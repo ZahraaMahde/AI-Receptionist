@@ -1,4 +1,6 @@
+import WebSocket from 'ws';
 import { config } from './config.js';
+
 
 const ELEVENLABS_WS_URL = 'wss://api.elevenlabs.io/v1/text-to-speech';
 
