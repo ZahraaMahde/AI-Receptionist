@@ -1,19 +1,11 @@
 import { createSTTStream } from './stt.js';
 import { createTTSStream } from './tts.js';
-import { streamLLMResponse, generateQuickResponse } from './llm.js';
+import { streamLLMResponse } from './llm.js';
 import { retrieveContext, cacheAnswer } from './rag.js';
 import { config } from './config.js';
 
 /**
  * Handle a single Twilio Media Stream WebSocket connection.
- * 
- * This is where the magic happens — orchestrating the full pipeline:
- * 1. Receive audio from Twilio → stream to Deepgram STT
- * 2. On utterance end → RAG retrieval from Supabase
- * 3. Stream LLM response → pipe tokens to ElevenLabs TTS
- * 4. Stream TTS audio back → send to Twilio
- * 
- * All steps overlap for minimum latency.
  */
 export function handleMediaStream(ws) {
   console.log('[Session] New call connected');
@@ -26,15 +18,11 @@ export function handleMediaStream(ws) {
   let conversationHistory = [];
   let callTranscript = [];
 
-  // Initialize STT
   sttStream = createSTTStream();
-
-  // Initialize TTS
   ttsStream = createTTSStream();
 
-  // When TTS produces audio, send it back through Twilio
   ttsStream.onAudio((audioBuffer) => {
-    if (!streamSid) return;
+    if (!streamSid || !ws) return;
 
     const base64Audio = audioBuffer.toString('base64');
 
@@ -47,7 +35,6 @@ export function handleMediaStream(ws) {
     }));
   });
 
-  // When a complete utterance is detected, process it
   sttStream.onUtteranceEnd(async (transcript) => {
     if (!transcript || isProcessing) return;
 
@@ -58,34 +45,29 @@ export function handleMediaStream(ws) {
     callTranscript.push({ role: 'user', text: transcript, timestamp: Date.now() });
 
     try {
-      // Step 1: RAG retrieval (embedding + vector search) ~80-100ms
       const { context, cached, cachedAnswer, embedding } = await retrieveContext(transcript);
 
       let fullResponse = '';
 
       if (cached && cachedAnswer) {
-        // Cache hit! Skip LLM entirely — send cached answer to TTS
-        console.log(`[Session] Cache hit — skipping LLM`);
+        console.log('[Session] Cache hit — skipping LLM');
         fullResponse = cachedAnswer;
         ttsStream.sendText(cachedAnswer);
-        ttsStream.finish();
       } else {
-        // Step 2: Stream LLM response → pipe to TTS in real-time
         const llmStream = streamLLMResponse(transcript, context, conversationHistory);
 
         for await (const chunk of llmStream) {
           fullResponse += chunk;
           ttsStream.sendText(chunk);
         }
-        ttsStream.finish();
 
-        // Cache this Q&A pair in background (don't await)
         if (embedding) {
           cacheAnswer(transcript, fullResponse, embedding).catch(() => {});
         }
       }
 
-      // Update conversation history
+      ttsStream.finish();
+
       conversationHistory.push(
         { role: 'user', content: transcript },
         { role: 'assistant', content: fullResponse }
@@ -96,7 +78,7 @@ export function handleMediaStream(ws) {
       console.log(`[Session] Turn complete in ${Date.now() - turnStart}ms`);
     } catch (err) {
       console.error('[Session] Processing error:', err);
-      // Fallback: say a generic apology
+
       const fallback = "I'm sorry, I didn't quite catch that. Could you repeat your question?";
       ttsStream.sendText(fallback);
       ttsStream.finish();
@@ -105,14 +87,11 @@ export function handleMediaStream(ws) {
     isProcessing = false;
   });
 
-  // Handle barge-in (caller starts speaking while AI is talking)
-  sttStream.onTranscript(({ isFinal, speechFinal }) => {
+  sttStream.onTranscript(({ isFinal }) => {
     if (isProcessing && isFinal) {
-      // Caller is speaking over the AI — interrupt TTS
       console.log('[Session] Barge-in detected — interrupting TTS');
       ttsStream.interrupt();
 
-      // Clear the Twilio audio buffer
       if (streamSid) {
         ws.send(JSON.stringify({
           event: 'clear',
@@ -122,7 +101,6 @@ export function handleMediaStream(ws) {
     }
   });
 
-  // Handle Twilio WebSocket messages
   ws.on('message', (data) => {
     try {
       const message = JSON.parse(data.toString());
@@ -137,15 +115,15 @@ export function handleMediaStream(ws) {
           callSid = message.start.callSid;
           console.log(`[Twilio] Stream started: ${streamSid}`);
 
-          // Send greeting
-          sendGreeting();
+          // Greeting disabled because calling ttsStream.finish()
+          // before the user speaks closes the ElevenLabs WebSocket.
           break;
 
-        case 'media':
-          // Forward audio to Deepgram STT
+        case 'media': {
           const audioData = Buffer.from(message.media.payload, 'base64');
           sttStream.send(audioData);
           break;
+        }
 
         case 'stop':
           console.log('[Twilio] Stream stopped');
@@ -171,24 +149,12 @@ export function handleMediaStream(ws) {
     cleanup();
   });
 
-  async function sendGreeting() {
-    try {
-      const greeting = await generateQuickResponse('', 'greeting');
-      ttsStream.sendText(greeting);
-      ttsStream.finish();
-      callTranscript.push({ role: 'assistant', text: greeting, timestamp: Date.now() });
-    } catch (err) {
-      console.error('[Session] Greeting error:', err);
-      ttsStream.sendText(`Thank you for calling ${config.companyName}. How can I help you today?`);
-      ttsStream.finish();
-    }
-  }
-
   function cleanup() {
     if (sttStream) {
       sttStream.close();
       sttStream = null;
     }
+
     if (ttsStream) {
       ttsStream.close();
       ttsStream = null;
@@ -196,18 +162,18 @@ export function handleMediaStream(ws) {
   }
 
   async function logCall() {
-    // Log the call transcript to Supabase (fire and forget)
     try {
       const { createClient } = await import('@supabase/supabase-js');
       const supabase = createClient(config.supabase.url, config.supabase.serviceKey);
-      
+
       await supabase.from('call_logs').insert({
         call_sid: callSid,
         transcript: callTranscript,
-        duration_ms: callTranscript.length > 0 
-          ? Date.now() - callTranscript[0].timestamp 
+        duration_ms: callTranscript.length > 0
+          ? Date.now() - callTranscript[0].timestamp
           : 0,
       });
+
       console.log('[Session] Call logged');
     } catch (err) {
       console.error('[Session] Log error:', err.message);
