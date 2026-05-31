@@ -5,46 +5,32 @@ const deepgram = createClient(config.deepgram.apiKey);
 
 /**
  * Create a streaming STT connection to Deepgram
- *
+ * 
  * Returns an object with:
  * - send(audioBuffer): feed audio chunks
- * - onTranscript(callback): called with { text, isFinal, speechFinal }
- * - onUtteranceEnd(callback): called with the finished transcript string
+ * - onTranscript(callback): called with { text, isFinal }
  * - close(): cleanup
- *
- * LATENCY FIX: we now drive the turn off Deepgram's `speech_final` flag
- * (fires ~`endpointing` ms after the caller stops talking) instead of the
- * slower `UtteranceEnd` event (gated by `utterance_end_ms`). UtteranceEnd is
- * kept only as a fallback in case speech_final never arrives.
+ * 
+ * Deepgram streams interim results every ~200ms, final results on speech pauses.
+ * We use interim results to start the RAG pipeline early (speculative execution).
  */
 export function createSTTStream() {
   const connection = deepgram.listen.live({
-    model: 'nova-2',
+    model: 'nova-2',           // Best accuracy/speed tradeoff
     language: 'en',
-    smart_format: true,
-    interim_results: true,
-    utterance_end_ms: 1000,  // FALLBACK only now. Deepgram requires >= 1000.
-    vad_events: true,
-    endpointing: 300,        // speech_final fires ~300ms after speech stops
-    encoding: 'mulaw',
-    sample_rate: 8000,
+    smart_format: true,         // Punctuation, capitalization
+    interim_results: true,      // Get partial results for early processing
+    utterance_end_ms: 1000,     // Detect end of utterance after 1s silence
+    vad_events: true,           // Voice activity detection
+    endpointing: 300,           // Endpoint after 300ms of silence
+    encoding: 'mulaw',          // Twilio sends mulaw
+    sample_rate: 8000,          // Twilio sends 8kHz
     channels: 1,
   });
 
   let transcriptCallback = null;
   let utteranceEndCallback = null;
   let currentTranscript = '';
-
-  // Fire the turn exactly once, then clear the buffer so the fallback
-  // (UtteranceEnd) doesn't double-trigger on the same utterance.
-  function fireTurn(source) {
-    if (!currentTranscript || !utteranceEndCallback) return;
-    const finalText = currentTranscript.trim();
-    currentTranscript = '';
-    if (!finalText) return;
-    console.log(`[STT] Turn triggered via ${source}: "${finalText}"`);
-    utteranceEndCallback(finalText);
-  }
 
   connection.on(LiveTranscriptionEvents.Open, () => {
     console.log('[STT] Deepgram connection opened');
@@ -55,8 +41,7 @@ export function createSTTStream() {
     if (!transcript) return;
 
     const isFinal = data.is_final;
-    const speechFinal = data.speech_final || false;
-
+    
     if (isFinal) {
       currentTranscript += (currentTranscript ? ' ' : '') + transcript;
       console.log(`[STT] Final: "${transcript}"`);
@@ -64,27 +49,22 @@ export function createSTTStream() {
       console.log(`[STT] Interim: "${transcript}"`);
     }
 
-    // Still expose every result for barge-in detection in the handler.
     if (transcriptCallback) {
       transcriptCallback({
         text: transcript,
         fullText: currentTranscript + (isFinal ? '' : ' ' + transcript),
         isFinal,
-        speechFinal,
+        speechFinal: data.speech_final || false,
       });
-    }
-
-    // EARLY TRIGGER: as soon as Deepgram says the caller finished speaking,
-    // kick off the turn. This removes the ~700ms-1s wait you had before.
-    if (speechFinal) {
-      fireTurn('speech_final');
     }
   });
 
-  // FALLBACK: only fires if speech_final never came (rare). Buffer is usually
-  // already empty here because fireTurn() cleared it.
   connection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
-    fireTurn('UtteranceEnd');
+    console.log(`[STT] Utterance end. Full: "${currentTranscript}"`);
+    if (utteranceEndCallback && currentTranscript) {
+      utteranceEndCallback(currentTranscript.trim());
+      currentTranscript = '';
+    }
   });
 
   connection.on(LiveTranscriptionEvents.Error, (err) => {
