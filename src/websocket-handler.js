@@ -51,7 +51,10 @@ export function handleMediaStream(ws) {
     });
 
     try {
-      const { context, cached, cachedAnswer, embedding } = await retrieveContext(transcript);
+      const context = '';
+      const cached = false;
+      const cachedAnswer = null;
+      const embedding = null;
 
       let fullResponse = '';
 
