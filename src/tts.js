@@ -41,9 +41,7 @@ export function createTTSStream() {
           use_speaker_boost: true,
         },
         generation_config: {
-          // LATENCY FIX: lower first threshold so short replies start
-          // generating audio almost immediately (was [120, 160, 250, 290]).
-          chunk_length_schedule: [50, 120, 160, 290],
+          chunk_length_schedule: [120, 160, 250, 290],
         },
       }));
 
@@ -61,7 +59,9 @@ export function createTTSStream() {
 
         if (message.audio) {
           console.log(`[TTS] Audio received: ${message.audio.length} chars`);
+
           const audioBuffer = Buffer.from(message.audio, 'base64');
+
           if (audioCallback) {
             audioCallback(audioBuffer);
           } else {
@@ -93,27 +93,10 @@ export function createTTSStream() {
       isConnecting = false;
       ws = null;
 
-      // Reconnect if the call is still active (e.g. after a barge-in or a
-      // dropped connection). Not on the per-turn hot path anymore.
-      if (!isClosed) {
+      if (!isClosed && textBuffer) {
         setTimeout(() => connect(), 100);
       }
     });
-
-    // KEEPALIVE: ElevenLabs closes idle stream-input sockets (~20s). Since we
-    // now hold one socket for the whole call, ping it during long silences.
-    startKeepalive();
-  }
-
-  let keepaliveTimer = null;
-  function startKeepalive() {
-    clearInterval(keepaliveTimer);
-    keepaliveTimer = setInterval(() => {
-      if (canSend() && !textBuffer) {
-        // a lone space keeps the context warm without producing audio
-        ws.send(JSON.stringify({ text: ' ' }));
-      }
-    }, 12000);
   }
 
   function canSend() {
@@ -166,25 +149,32 @@ export function createTTSStream() {
       }
     },
 
-    // LATENCY FIX: finish() no longer sends the EOS empty-string and no longer
-    // tears down + reconnects the socket. It just flushes whatever is buffered
-    // and forces generation. The SAME socket stays warm for the next turn, so
-    // you don't pay a fresh ElevenLabs handshake at the start of every reply.
     finish() {
       clearTimeout(flushTimeout);
+
       if (textBuffer) {
         flush();
-      } else if (canSend()) {
-        // nudge generation of any sub-threshold residual text
-        ws.send(JSON.stringify({ text: ' ', try_trigger_generation: true }));
       }
+
+      if (!canSend()) {
+        console.warn('[TTS] Tried to finish, but WebSocket is not ready');
+        return;
+      }
+
+      ws.send(JSON.stringify({ text: '' }));
+      isReady = false;
+
+      setTimeout(() => {
+        if (!isClosed) {
+          connect();
+        }
+      }, 150);
     },
 
     onAudio(callback) {
       audioCallback = callback;
     },
 
-    // Barge-in: hard reset the context so the old reply stops immediately.
     interrupt() {
       clearTimeout(flushTimeout);
       textBuffer = '';
@@ -206,7 +196,6 @@ export function createTTSStream() {
     close() {
       isClosed = true;
       clearTimeout(flushTimeout);
-      clearInterval(keepaliveTimer);
       textBuffer = '';
 
       if (ws && ws.readyState === WebSocket.OPEN) {
