@@ -10,6 +10,7 @@ export function createTTSStream() {
   let audioCallback = null;
   let textBuffer = '';
   let isClosed = false;
+  let generationId = 0;
 
   return {
     sendText(text) {
@@ -19,6 +20,8 @@ export function createTTSStream() {
 
     async finish() {
       if (isClosed) return;
+
+      const currentGeneration = generationId;
 
       const text = textBuffer.trim();
       textBuffer = '';
@@ -35,10 +38,21 @@ export function createTTSStream() {
           response_format: 'mp3',
         });
 
+        if (currentGeneration !== generationId || isClosed) {
+          console.log('[TTS] Discarding interrupted audio before reading response');
+          return;
+        }
+
         const mp3Buffer = Buffer.from(await response.arrayBuffer());
         console.log(`[TTS] OpenAI audio received: ${mp3Buffer.length} bytes`);
 
         const mulawBuffer = await convertToMulaw8000(mp3Buffer);
+
+        if (currentGeneration !== generationId || isClosed) {
+          console.log('[TTS] Discarding interrupted audio');
+          return;
+        }
+
         console.log(`[TTS] Converted to mulaw 8k: ${mulawBuffer.length} bytes`);
 
         if (audioCallback) {
@@ -56,11 +70,13 @@ export function createTTSStream() {
     },
 
     interrupt() {
+      generationId++;
       textBuffer = '';
-      console.log('[TTS] Interrupt requested');
+      console.log(`[TTS] Interrupt requested (generation ${generationId})`);
     },
 
     close() {
+      generationId++;
       isClosed = true;
       textBuffer = '';
     },
