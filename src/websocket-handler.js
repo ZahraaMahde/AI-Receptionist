@@ -24,6 +24,8 @@ export function handleMediaStream(ws) {
   ttsStream.onAudio((audioBuffer) => {
     if (!streamSid || !ws) return;
 
+    console.log(`[Twilio] Sending OpenAI TTS audio: ${audioBuffer.length} bytes`);
+
     const base64Audio = audioBuffer.toString('base64');
 
     ws.send(JSON.stringify({
@@ -42,7 +44,11 @@ export function handleMediaStream(ws) {
     isProcessing = true;
 
     const turnStart = Date.now();
-    callTranscript.push({ role: 'user', text: transcript, timestamp: Date.now() });
+    callTranscript.push({
+      role: 'user',
+      text: transcript,
+      timestamp: Date.now(),
+    });
 
     try {
       const { context, cached, cachedAnswer, embedding } = await retrieveContext(transcript);
@@ -66,14 +72,18 @@ export function handleMediaStream(ws) {
         }
       }
 
-      ttsStream.finish();
+      await ttsStream.finish();
 
       conversationHistory.push(
         { role: 'user', content: transcript },
         { role: 'assistant', content: fullResponse }
       );
 
-      callTranscript.push({ role: 'assistant', text: fullResponse, timestamp: Date.now() });
+      callTranscript.push({
+        role: 'assistant',
+        text: fullResponse,
+        timestamp: Date.now(),
+      });
 
       console.log(`[Session] Turn complete in ${Date.now() - turnStart}ms`);
     } catch (err) {
@@ -81,10 +91,10 @@ export function handleMediaStream(ws) {
 
       const fallback = "I'm sorry, I didn't quite catch that. Could you repeat your question?";
       ttsStream.sendText(fallback);
-      ttsStream.finish();
+      await ttsStream.finish();
+    } finally {
+      isProcessing = false;
     }
-
-    isProcessing = false;
   });
 
   sttStream.onTranscript(({ isFinal }) => {
@@ -114,14 +124,13 @@ export function handleMediaStream(ws) {
           streamSid = message.start.streamSid;
           callSid = message.start.callSid;
           console.log(`[Twilio] Stream started: ${streamSid}`);
-
-          // Greeting disabled because calling ttsStream.finish()
-          // before the user speaks closes the ElevenLabs WebSocket.
           break;
 
         case 'media': {
           const audioData = Buffer.from(message.media.payload, 'base64');
-          sttStream.send(audioData);
+          if (sttStream) {
+            sttStream.send(audioData);
+          }
           break;
         }
 
