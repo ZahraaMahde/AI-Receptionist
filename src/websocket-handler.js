@@ -1,7 +1,7 @@
 import { createSTTStream } from './stt.js';
 import { createTTSStream } from './tts.js';
 import { streamLLMResponse } from './llm.js';
-import { retrieveContext, cacheAnswer } from './rag.js';
+import { retrieveContext, cacheAnswer, warmUp } from './rag.js';
 import { config } from './config.js';
 
 /**
@@ -126,6 +126,10 @@ export function handleMediaStream(ws) {
           streamSid = message.start.streamSid;
           callSid = message.start.callSid;
           console.log(`[Twilio] Stream started: ${streamSid}`);
+
+          // Prime OpenAI + Supabase connections so the first real question
+          // doesn't pay cold-start latency. Fire-and-forget.
+          warmUp().catch(() => {});
 
           sendOpeningGreeting().catch((err) => {
             console.error('[Session] Opening greeting error:', err);
