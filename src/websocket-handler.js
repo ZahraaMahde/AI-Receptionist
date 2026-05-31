@@ -124,10 +124,15 @@ export function handleMediaStream(ws) {
           break;
 
         case 'start':
-          streamSid = message.start.streamSid;
-          callSid = message.start.callSid;
-          console.log(`[Twilio] Stream started: ${streamSid}`);
-          break;
+        streamSid = message.start.streamSid;
+        callSid = message.start.callSid;
+        console.log(`[Twilio] Stream started: ${streamSid}`);
+      
+        sendOpeningGreeting().catch((err) => {
+          console.error('[Session] Opening greeting error:', err);
+        });
+      
+        break;
 
         case 'media': {
           const audioData = Buffer.from(message.media.payload, 'base64');
@@ -191,4 +196,19 @@ export function handleMediaStream(ws) {
       console.error('[Session] Log error:', err.message);
     }
   }
+
+  async function sendOpeningGreeting() {
+  const greeting = `Hello, I am the AI receptionist for ${config.companyName}. How can I help you today?`;
+
+  console.log(`[Session] Sending opening greeting: "${greeting}"`);
+
+  callTranscript.push({
+    role: 'assistant',
+    text: greeting,
+    timestamp: Date.now(),
+  });
+
+  ttsStream.sendText(greeting);
+  await ttsStream.finish();
+}
 }
