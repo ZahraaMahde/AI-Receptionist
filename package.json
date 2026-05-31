@@ -19,5 +19,11 @@
     "openai": "^4.77.0",
     "ws": "^8.18.0",
     "undici": "^7.2.0"
-  }
+  },
+  "scripts": {
+  "start": "node src/server.js",
+  "dev": "node --watch src/server.js",
+  "ingest": "node scripts/ingest.js",
+  "ingest-pdf": "node scripts/ingest-pdf.js"
+}
 }
