@@ -45,10 +45,7 @@ export function handleMediaStream(ws) {
     callTranscript.push({ role: 'user', text: transcript, timestamp: Date.now() });
 
     try {
-      const context = '';
-      const cached = false;
-      const cachedAnswer = null;
-      const embedding = null;
+      const { context, cached, cachedAnswer, embedding } = await retrieveContext(transcript);
 
       let fullResponse = '';
 
