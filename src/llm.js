@@ -31,7 +31,7 @@ export async function* streamLLMResponse(userMessage, ragContext, conversationHi
     messages,
     stream: true,
     temperature: 0.3,          // Lower temp for factual accuracy
-    max_tokens: 60,           // Keep responses concise for phone
+    max_tokens: 50,           // Keep responses concise for phone
     presence_penalty: 0.1,     // Slight penalty to avoid repetition
   });
 
@@ -68,6 +68,8 @@ function buildSystemMessage(ragContext) {
   prompt += '- Don\'t use markdown, bullet points, or formatting — this is spoken\n';
   prompt += '- Reply in one short sentence unless the caller asks for details.\n';
   prompt += '- If the caller only greets you, reply briefly and ask what they need, without repeating the full greeting.\n';
+  prompt += '- Reply in one short sentence unless details are requested.\n';
+prompt += '- Keep answers under 15 words when possible.\n';
   
   if (ragContext) {
     prompt += '\n## Company knowledge base (use this to answer questions):\n';
