@@ -1,7 +1,7 @@
 import { createSTTStream } from './stt.js';
 import { createTTSStream } from './tts.js';
 import { streamLLMResponse } from './llm.js';
-import { retrieveContext, cacheAnswer, warmUp } from './rag.js';
+import { retrieveContext, cacheAnswer } from './rag.js';
 import { config } from './config.js';
 
 /**
@@ -24,7 +24,7 @@ export function handleMediaStream(ws) {
   ttsStream.onAudio((audioBuffer) => {
     if (!streamSid || !ws) return;
 
-    console.log(`[Twilio] Sending TTS audio: ${audioBuffer.length} bytes`);
+    console.log(`[Twilio] Sending OpenAI TTS audio: ${audioBuffer.length} bytes`);
 
     const base64Audio = audioBuffer.toString('base64');
 
@@ -53,7 +53,7 @@ export function handleMediaStream(ws) {
     try {
       const { context, cached, cachedAnswer, embedding } =
         await retrieveContext(transcript);
-
+    
       let fullResponse = '';
 
       if (cached && cachedAnswer) {
@@ -73,8 +73,7 @@ export function handleMediaStream(ws) {
         }
       }
 
-      // Flushes remaining text and keeps the TTS socket warm for the next turn.
-      ttsStream.finish();
+      await ttsStream.finish();
 
       conversationHistory.push(
         { role: 'user', content: transcript },
@@ -93,7 +92,7 @@ export function handleMediaStream(ws) {
 
       const fallback = "I'm sorry, I didn't quite catch that. Could you repeat your question?";
       ttsStream.sendText(fallback);
-      ttsStream.finish();
+      await ttsStream.finish();
     } finally {
       isProcessing = false;
     }
@@ -123,19 +122,15 @@ export function handleMediaStream(ws) {
           break;
 
         case 'start':
-          streamSid = message.start.streamSid;
-          callSid = message.start.callSid;
-          console.log(`[Twilio] Stream started: ${streamSid}`);
-
-          // Prime OpenAI + Supabase connections so the first real question
-          // doesn't pay cold-start latency. Fire-and-forget.
-          warmUp().catch(() => {});
-
-          sendOpeningGreeting().catch((err) => {
-            console.error('[Session] Opening greeting error:', err);
-          });
-
-          break;
+        streamSid = message.start.streamSid;
+        callSid = message.start.callSid;
+        console.log(`[Twilio] Stream started: ${streamSid}`);
+      
+        sendOpeningGreeting().catch((err) => {
+          console.error('[Session] Opening greeting error:', err);
+        });
+      
+        break;
 
         case 'media': {
           const audioData = Buffer.from(message.media.payload, 'base64');
@@ -200,22 +195,18 @@ export function handleMediaStream(ws) {
     }
   }
 
-  function sendOpeningGreeting() {
-    const greeting = `Hello, ${config.companyName}. How can I help ?`;
+  async function sendOpeningGreeting() {
+  const greeting = `Hello, ${config.companyName}. How can I help ?`;
 
-    console.log(`[Session] Sending opening greeting: "${greeting}"`);
+  console.log(`[Session] Sending opening greeting: "${greeting}"`);
 
-    callTranscript.push({
-      role: 'assistant',
-      text: greeting,
-      timestamp: Date.now(),
-    });
+  callTranscript.push({
+    role: 'assistant',
+    text: greeting,
+    timestamp: Date.now(),
+  });
 
-    ttsStream.sendText(greeting);
-    // finish() now just flushes — it does NOT tear down the socket, so the
-    // connection is already warm when the caller asks the first question.
-    ttsStream.finish();
-
-    return Promise.resolve();
-  }
+  ttsStream.sendText(greeting);
+  await ttsStream.finish();
+}
 }
