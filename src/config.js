@@ -39,7 +39,7 @@ export const config = {
   // RAG settings
   rag: {
     matchThreshold: 0.1,
-    matchCount: 5,
+    matchCount: 2,
     embeddingModel: 'text-embedding-3-small',
   },
 
