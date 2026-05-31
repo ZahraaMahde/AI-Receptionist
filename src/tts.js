@@ -10,10 +10,19 @@ export function createTTSStream() {
   let ws = null;
   let audioCallback = null;
   let isReady = false;
+  let isClosed = false;
+  let isConnecting = false;
   let textBuffer = '';
   let flushTimeout = null;
 
   function connect() {
+    if (isClosed) return;
+    if (isConnecting) return;
+    if (ws && ws.readyState === WebSocket.OPEN) return;
+
+    isConnecting = true;
+    isReady = false;
+
     ws = new WebSocket(wsUrl, {
       headers: {
         'xi-api-key': config.elevenlabs.apiKey,
@@ -37,6 +46,11 @@ export function createTTSStream() {
       }));
 
       isReady = true;
+      isConnecting = false;
+
+      if (textBuffer) {
+        scheduleFlush(30);
+      }
     });
 
     ws.on('message', (data) => {
@@ -69,24 +83,57 @@ export function createTTSStream() {
 
     ws.on('error', (err) => {
       console.error('[TTS] WebSocket error:', err.message);
+      isReady = false;
+      isConnecting = false;
     });
 
     ws.on('close', (code, reason) => {
       console.log(`[TTS] WebSocket closed: ${code} ${reason?.toString() || ''}`);
       isReady = false;
+      isConnecting = false;
+      ws = null;
+
+      if (!isClosed && textBuffer) {
+        setTimeout(() => connect(), 100);
+      }
     });
+  }
+
+  function canSend() {
+    return !isClosed && isReady && ws && ws.readyState === WebSocket.OPEN;
+  }
+
+  function scheduleFlush(delay = 100) {
+    clearTimeout(flushTimeout);
+    flushTimeout = setTimeout(() => {
+      flush();
+    }, delay);
+  }
+
+  function flush() {
+    if (!textBuffer) return;
+
+    if (!canSend()) {
+      console.log('[TTS] WebSocket not ready, reconnecting before flush');
+      connect();
+      scheduleFlush(150);
+      return;
+    }
+
+    ws.send(JSON.stringify({
+      text: textBuffer,
+      try_trigger_generation: true,
+    }));
+
+    console.log(`[TTS] Sent: "${textBuffer.substring(0, 50)}..."`);
+    textBuffer = '';
   }
 
   connect();
 
   return {
     sendText(text) {
-      if (!text) return;
-
-      if (!isReady || !ws || ws.readyState !== WebSocket.OPEN) {
-        console.warn('[TTS] Tried to send text, but WebSocket is not ready');
-        return;
-      }
+      if (!text || isClosed) return;
 
       textBuffer += text;
 
@@ -94,53 +141,34 @@ export function createTTSStream() {
       const commaEnd = /,\s*$/;
 
       if (sentenceEnd.test(textBuffer) || textBuffer.length > 150) {
-        this._flush();
+        flush();
       } else if (commaEnd.test(textBuffer) && textBuffer.length > 40) {
-        this._flush();
+        flush();
       } else {
-        clearTimeout(flushTimeout);
-        flushTimeout = setTimeout(() => this._flush(), 100);
+        scheduleFlush(100);
       }
-    },
-
-    _flush() {
-      if (!textBuffer) return;
-
-      if (!isReady || !ws || ws.readyState !== WebSocket.OPEN) {
-        console.warn('[TTS] Tried to flush text, but WebSocket is not ready');
-        return;
-      }
-
-      clearTimeout(flushTimeout);
-
-      ws.send(JSON.stringify({
-        text: textBuffer,
-        try_trigger_generation: true,
-      }));
-
-      console.log(`[TTS] Sent: "${textBuffer.substring(0, 50)}..."`);
-      textBuffer = '';
     },
 
     finish() {
-      if (!isReady || !ws || ws.readyState !== WebSocket.OPEN) {
+      clearTimeout(flushTimeout);
+
+      if (textBuffer) {
+        flush();
+      }
+
+      if (!canSend()) {
         console.warn('[TTS] Tried to finish, but WebSocket is not ready');
         return;
       }
 
-      clearTimeout(flushTimeout);
-
-      if (textBuffer) {
-        ws.send(JSON.stringify({
-          text: textBuffer,
-          try_trigger_generation: true,
-        }));
-
-        console.log(`[TTS] Sent final: "${textBuffer.substring(0, 50)}..."`);
-        textBuffer = '';
-      }
-
       ws.send(JSON.stringify({ text: '' }));
+      isReady = false;
+
+      setTimeout(() => {
+        if (!isClosed) {
+          connect();
+        }
+      }, 150);
     },
 
     onAudio(callback) {
@@ -155,15 +183,28 @@ export function createTTSStream() {
         ws.close();
       }
 
-      setTimeout(() => connect(), 50);
+      isReady = false;
+      isConnecting = false;
+
+      setTimeout(() => {
+        if (!isClosed) {
+          connect();
+        }
+      }, 100);
     },
 
     close() {
+      isClosed = true;
       clearTimeout(flushTimeout);
+      textBuffer = '';
 
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.close();
       }
+
+      ws = null;
+      isReady = false;
+      isConnecting = false;
     },
   };
 }
