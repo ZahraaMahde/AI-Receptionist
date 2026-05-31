@@ -196,7 +196,7 @@ export function handleMediaStream(ws) {
   }
 
   async function sendOpeningGreeting() {
-  const greeting = `Hello, I am the AI receptionist for ${config.companyName}. How can I help you today?`;
+  const greeting = `Hello, ${config.companyName}. How can I help ?`;
 
   console.log(`[Session] Sending opening greeting: "${greeting}"`);
 
