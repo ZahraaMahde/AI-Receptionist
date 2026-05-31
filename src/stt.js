@@ -3,34 +3,42 @@ import { config } from './config.js';
 
 const deepgram = createClient(config.deepgram.apiKey);
 
-/**
- * Create a streaming STT connection to Deepgram
- * 
- * Returns an object with:
- * - send(audioBuffer): feed audio chunks
- * - onTranscript(callback): called with { text, isFinal }
- * - close(): cleanup
- * 
- * Deepgram streams interim results every ~200ms, final results on speech pauses.
- * We use interim results to start the RAG pipeline early (speculative execution).
- */
 export function createSTTStream() {
   const connection = deepgram.listen.live({
-    model: 'nova-2',           // Best accuracy/speed tradeoff
+    model: 'nova-2',
     language: 'en',
-    smart_format: true,         // Punctuation, capitalization
-    interim_results: true,      // Get partial results for early processing
-    utterance_end_ms: 1000,     // Detect end of utterance after 1s silence
-    vad_events: true,           // Voice activity detection
-    endpointing: 300,           // Endpoint after 300ms of silence
-    encoding: 'mulaw',          // Twilio sends mulaw
-    sample_rate: 8000,          // Twilio sends 8kHz
+    smart_format: true,
+    interim_results: true,
+    utterance_end_ms: 800,
+    vad_events: true,
+    endpointing: 300,
+    encoding: 'mulaw',
+    sample_rate: 8000,
     channels: 1,
   });
 
   let transcriptCallback = null;
   let utteranceEndCallback = null;
   let currentTranscript = '';
+  let lastInterimTranscript = '';
+  let hasProcessedCurrentUtterance = false;
+
+  function processCurrentUtterance(reason = 'unknown') {
+    const finalText = currentTranscript.trim() || lastInterimTranscript.trim();
+
+    if (!finalText || hasProcessedCurrentUtterance) return;
+
+    console.log(`[STT] Processing utterance via ${reason}. Full: "${finalText}"`);
+
+    hasProcessedCurrentUtterance = true;
+
+    if (utteranceEndCallback) {
+      utteranceEndCallback(finalText);
+    }
+
+    currentTranscript = '';
+    lastInterimTranscript = '';
+  }
 
   connection.on(LiveTranscriptionEvents.Open, () => {
     console.log('[STT] Deepgram connection opened');
@@ -41,11 +49,14 @@ export function createSTTStream() {
     if (!transcript) return;
 
     const isFinal = data.is_final;
-    
+    const speechFinal = data.speech_final || false;
+
     if (isFinal) {
       currentTranscript += (currentTranscript ? ' ' : '') + transcript;
+      lastInterimTranscript = '';
       console.log(`[STT] Final: "${transcript}"`);
     } else {
+      lastInterimTranscript = transcript;
       console.log(`[STT] Interim: "${transcript}"`);
     }
 
@@ -54,17 +65,21 @@ export function createSTTStream() {
         text: transcript,
         fullText: currentTranscript + (isFinal ? '' : ' ' + transcript),
         isFinal,
-        speechFinal: data.speech_final || false,
+        speechFinal,
       });
+    }
+
+    if (speechFinal) {
+      processCurrentUtterance('speech_final');
+    }
+
+    if (!isFinal) {
+      hasProcessedCurrentUtterance = false;
     }
   });
 
   connection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
-    console.log(`[STT] Utterance end. Full: "${currentTranscript}"`);
-    if (utteranceEndCallback && currentTranscript) {
-      utteranceEndCallback(currentTranscript.trim());
-      currentTranscript = '';
-    }
+    processCurrentUtterance('utterance_end');
   });
 
   connection.on(LiveTranscriptionEvents.Error, (err) => {
@@ -72,6 +87,7 @@ export function createSTTStream() {
   });
 
   connection.on(LiveTranscriptionEvents.Close, () => {
+    processCurrentUtterance('connection_close');
     console.log('[STT] Deepgram connection closed');
   });
 
@@ -92,9 +108,12 @@ export function createSTTStream() {
 
     resetTranscript() {
       currentTranscript = '';
+      lastInterimTranscript = '';
+      hasProcessedCurrentUtterance = false;
     },
 
     close() {
+      processCurrentUtterance('manual_close');
       connection.requestClose();
     },
   };
