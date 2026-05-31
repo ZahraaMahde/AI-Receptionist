@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "ingest": "node scripts/ingest.js"
+    "ingest": "node scripts/ingest.js",
+    "ingest-pdf": "node scripts/ingest-pdf.js"
   },
   "dependencies": {
     "@deepgram/sdk": "^3.9.0",
@@ -17,13 +18,8 @@
     "@fastify/websocket": "^11.0.0",
     "@fastify/formbody": "^8.0.0",
     "openai": "^4.77.0",
+    "pdf-parse": "^1.1.1",
     "ws": "^8.18.0",
     "undici": "^7.2.0"
-  },
-  "scripts": {
-  "start": "node src/server.js",
-  "dev": "node --watch src/server.js",
-  "ingest": "node scripts/ingest.js",
-  "ingest-pdf": "node scripts/ingest-pdf.js"
-}
+  }
 }
