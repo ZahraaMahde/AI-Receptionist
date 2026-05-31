@@ -31,7 +31,7 @@ export async function* streamLLMResponse(userMessage, ragContext, conversationHi
     messages,
     stream: true,
     temperature: 0.3,          // Lower temp for factual accuracy
-    max_tokens: 80,           // Keep responses concise for phone
+    max_tokens: 60,           // Keep responses concise for phone
     presence_penalty: 0.1,     // Slight penalty to avoid repetition
   });
 
