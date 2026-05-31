@@ -51,11 +51,9 @@ export function handleMediaStream(ws) {
     });
 
     try {
-      const context = '';
-      const cached = false;
-      const cachedAnswer = null;
-      const embedding = null;
-
+      const { context, cached, cachedAnswer, embedding } =
+        await retrieveContext(transcript);
+    
       let fullResponse = '';
 
       if (cached && cachedAnswer) {
