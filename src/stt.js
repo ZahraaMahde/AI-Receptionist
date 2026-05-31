@@ -9,7 +9,7 @@ export function createSTTStream() {
     language: 'en',
     smart_format: true,
     interim_results: true,
-    utterance_end_ms: 800,
+    utterance_end_ms: 1000,
     vad_events: true,
     endpointing: 300,
     encoding: 'mulaw',
@@ -19,12 +19,19 @@ export function createSTTStream() {
 
   let transcriptCallback = null;
   let utteranceEndCallback = null;
+
   let currentTranscript = '';
   let lastInterimTranscript = '';
   let hasProcessedCurrentUtterance = false;
 
+  function resetCurrentUtterance() {
+    currentTranscript = '';
+    lastInterimTranscript = '';
+    hasProcessedCurrentUtterance = false;
+  }
+
   function processCurrentUtterance(reason = 'unknown') {
-    const finalText = currentTranscript.trim() || lastInterimTranscript.trim();
+    const finalText = (currentTranscript || lastInterimTranscript).trim();
 
     if (!finalText || hasProcessedCurrentUtterance) return;
 
@@ -48,8 +55,8 @@ export function createSTTStream() {
     const transcript = data.channel?.alternatives?.[0]?.transcript;
     if (!transcript) return;
 
-    const isFinal = data.is_final;
-    const speechFinal = data.speech_final || false;
+    const isFinal = data.is_final === true;
+    const speechFinal = data.speech_final === true;
 
     if (isFinal) {
       currentTranscript += (currentTranscript ? ' ' : '') + transcript;
@@ -57,13 +64,14 @@ export function createSTTStream() {
       console.log(`[STT] Final: "${transcript}"`);
     } else {
       lastInterimTranscript = transcript;
+      hasProcessedCurrentUtterance = false;
       console.log(`[STT] Interim: "${transcript}"`);
     }
 
     if (transcriptCallback) {
       transcriptCallback({
         text: transcript,
-        fullText: currentTranscript + (isFinal ? '' : ' ' + transcript),
+        fullText: currentTranscript || lastInterimTranscript,
         isFinal,
         speechFinal,
       });
@@ -72,10 +80,6 @@ export function createSTTStream() {
     if (speechFinal) {
       processCurrentUtterance('speech_final');
     }
-
-    if (!isFinal) {
-      hasProcessedCurrentUtterance = false;
-    }
   });
 
   connection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
@@ -83,7 +87,7 @@ export function createSTTStream() {
   });
 
   connection.on(LiveTranscriptionEvents.Error, (err) => {
-    console.error('[STT] Deepgram error:', err.message);
+    console.error('[STT] Deepgram error:', JSON.stringify(err, null, 2));
   });
 
   connection.on(LiveTranscriptionEvents.Close, () => {
@@ -93,8 +97,12 @@ export function createSTTStream() {
 
   return {
     send(audioBuffer) {
-      if (connection.getReadyState() === 1) {
-        connection.send(audioBuffer);
+      try {
+        if (connection.getReadyState() === 1) {
+          connection.send(audioBuffer);
+        }
+      } catch (err) {
+        console.error('[STT] Send error:', err.message);
       }
     },
 
@@ -107,14 +115,16 @@ export function createSTTStream() {
     },
 
     resetTranscript() {
-      currentTranscript = '';
-      lastInterimTranscript = '';
-      hasProcessedCurrentUtterance = false;
+      resetCurrentUtterance();
     },
 
     close() {
-      processCurrentUtterance('manual_close');
-      connection.requestClose();
+      try {
+        processCurrentUtterance('manual_close');
+        connection.requestClose();
+      } catch (err) {
+        console.error('[STT] Close error:', err.message);
+      }
     },
   };
 }
