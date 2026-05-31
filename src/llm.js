@@ -67,6 +67,7 @@ function buildSystemMessage(ragContext) {
   prompt += '- Use natural filler words occasionally (well, sure, of course)\n';
   prompt += '- Don\'t use markdown, bullet points, or formatting — this is spoken\n';
   prompt += '- Reply in one short sentence unless the caller asks for details.\n';
+  prompt += '- If the caller only greets you, reply briefly and ask what they need, without repeating the full greeting.\n';
   
   if (ragContext) {
     prompt += '\n## Company knowledge base (use this to answer questions):\n';
