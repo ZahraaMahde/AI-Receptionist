@@ -1,18 +1,8 @@
 import WebSocket from 'ws';
 import { config } from './config.js';
 
-
 const ELEVENLABS_WS_URL = 'wss://api.elevenlabs.io/v1/text-to-speech';
 
-/**
- * Create a streaming TTS connection to ElevenLabs
- * 
- * Uses WebSocket for lowest latency (~300ms to first audio chunk).
- * Text is sent in small chunks as LLM tokens arrive.
- * Audio is streamed back in mulaw format for Twilio.
- * 
- * @returns {Object} TTS stream controller
- */
 export function createTTSStream() {
   const voiceId = config.elevenlabs.voiceId;
   const wsUrl = `${ELEVENLABS_WS_URL}/${voiceId}/stream-input?model_id=eleven_turbo_v2_5&output_format=ulaw_8000`;
@@ -33,9 +23,9 @@ export function createTTSStream() {
     ws.on('open', () => {
       console.log('[TTS] ElevenLabs WebSocket connected');
 
-      // Send initial config - BOS (beginning of stream)
       ws.send(JSON.stringify({
         text: ' ',
+        xi_api_key: config.elevenlabs.apiKey,
         voice_settings: {
           stability: 0.5,
           similarity_boost: 0.75,
@@ -54,11 +44,19 @@ export function createTTSStream() {
         const message = JSON.parse(data.toString());
 
         if (message.audio) {
-          // Audio chunk received (base64 encoded mulaw)
+          console.log(`[TTS] Audio received: ${message.audio.length} chars`);
+
           const audioBuffer = Buffer.from(message.audio, 'base64');
+
           if (audioCallback) {
             audioCallback(audioBuffer);
+          } else {
+            console.warn('[TTS] Audio received but no audioCallback registered');
           }
+        }
+
+        if (message.error) {
+          console.error('[TTS] ElevenLabs error:', message.error);
         }
 
         if (message.isFinal) {
@@ -73,8 +71,8 @@ export function createTTSStream() {
       console.error('[TTS] WebSocket error:', err.message);
     });
 
-    ws.on('close', () => {
-      console.log('[TTS] WebSocket closed');
+    ws.on('close', (code, reason) => {
+      console.log(`[TTS] WebSocket closed: ${code} ${reason?.toString() || ''}`);
       isReady = false;
     });
   }
@@ -82,17 +80,16 @@ export function createTTSStream() {
   connect();
 
   return {
-    /**
-     * Send text to be synthesized.
-     * Buffers small chunks and flushes on sentence boundaries
-     * for more natural-sounding speech.
-     */
     sendText(text) {
-      if (!isReady || !ws) return;
+      if (!text) return;
+
+      if (!isReady || !ws || ws.readyState !== WebSocket.OPEN) {
+        console.warn('[TTS] Tried to send text, but WebSocket is not ready');
+        return;
+      }
 
       textBuffer += text;
 
-      // Flush on sentence boundaries for natural prosody
       const sentenceEnd = /[.!?]\s*$/;
       const commaEnd = /,\s*$/;
 
@@ -101,14 +98,18 @@ export function createTTSStream() {
       } else if (commaEnd.test(textBuffer) && textBuffer.length > 40) {
         this._flush();
       } else {
-        // Auto-flush after 100ms if no sentence boundary
         clearTimeout(flushTimeout);
         flushTimeout = setTimeout(() => this._flush(), 100);
       }
     },
 
     _flush() {
-      if (!textBuffer || !isReady) return;
+      if (!textBuffer) return;
+
+      if (!isReady || !ws || ws.readyState !== WebSocket.OPEN) {
+        console.warn('[TTS] Tried to flush text, but WebSocket is not ready');
+        return;
+      }
 
       clearTimeout(flushTimeout);
 
@@ -121,62 +122,52 @@ export function createTTSStream() {
       textBuffer = '';
     },
 
-    /**
-     * Signal end of text input — flush remaining buffer
-     * and send EOS (end of stream)
-     */
     finish() {
-      if (!isReady || !ws) return;
+      if (!isReady || !ws || ws.readyState !== WebSocket.OPEN) {
+        console.warn('[TTS] Tried to finish, but WebSocket is not ready');
+        return;
+      }
 
       clearTimeout(flushTimeout);
 
-      // Flush any remaining text
       if (textBuffer) {
         ws.send(JSON.stringify({
           text: textBuffer,
           try_trigger_generation: true,
         }));
+
+        console.log(`[TTS] Sent final: "${textBuffer.substring(0, 50)}..."`);
         textBuffer = '';
       }
 
-      // Send EOS signal
       ws.send(JSON.stringify({ text: '' }));
     },
 
-    /**
-     * Register callback for audio chunks
-     * @param {Function} callback - Called with Buffer of mulaw audio
-     */
     onAudio(callback) {
       audioCallback = callback;
     },
 
-    /**
-     * Interrupt current speech (for barge-in handling)
-     */
     interrupt() {
       clearTimeout(flushTimeout);
       textBuffer = '';
-      // Close and reconnect for clean state
-      if (ws) {
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
         ws.close();
-        setTimeout(() => connect(), 50);
       }
+
+      setTimeout(() => connect(), 50);
     },
 
     close() {
       clearTimeout(flushTimeout);
-      if (ws) {
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
         ws.close();
       }
     },
   };
 }
 
-/**
- * Simple one-shot TTS using REST API (for greetings/short responses)
- * Returns base64 mulaw audio
- */
 export async function synthesizeSpeech(text) {
   const start = Date.now();
 
@@ -199,7 +190,13 @@ export async function synthesizeSpeech(text) {
     }
   );
 
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`[TTS] ElevenLabs REST error ${response.status}: ${errorText}`);
+  }
+
   const audioBuffer = Buffer.from(await response.arrayBuffer());
+
   console.log(`[TTS] One-shot synthesis in ${Date.now() - start}ms (${audioBuffer.length} bytes)`);
 
   return audioBuffer;
