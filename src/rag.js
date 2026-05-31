@@ -92,11 +92,19 @@ export async function searchDocuments(embedding) {
 export async function retrieveContext(userMessage) {
   const totalStart = Date.now();
 
+  // 1. Embedding is required by both the cache lookup and the doc search.
   const embedding = await generateEmbedding(userMessage);
 
-  const cachedAnswer = await checkCache(embedding);
+  // 2. LATENCY FIX: run the cache lookup and document search concurrently
+  //    instead of one after the other. They both only need the embedding and
+  //    don't depend on each other, so there's no reason to serialize them.
+  const [cachedAnswer, documents] = await Promise.all([
+    checkCache(embedding),
+    searchDocuments(embedding),
+  ]);
 
   if (cachedAnswer) {
+    console.log(`[RAG] Total retrieval in ${Date.now() - totalStart}ms (cache hit)`);
     return {
       context: '',
       cached: true,
@@ -104,8 +112,6 @@ export async function retrieveContext(userMessage) {
       embedding,
     };
   }
-
-  const documents = await searchDocuments(embedding);
 
   const context = documents
     .map((doc, i) => `[${i + 1}] ${doc.content}`)
@@ -118,6 +124,25 @@ export async function retrieveContext(userMessage) {
     cached: false,
     embedding,
   };
+}
+
+/**
+ * Prime the OpenAI and Supabase connections so the FIRST real question of a
+ * call doesn't pay TLS/HTTP cold-start cost (the ~1.6s spike you saw on turn 1).
+ * Fire-and-forget this when the call connects.
+ */
+export async function warmUp() {
+  const start = Date.now();
+  try {
+    const embedding = await generateEmbedding('warmup');
+    await Promise.all([
+      checkCache(embedding).catch(() => null),
+      searchDocuments(embedding).catch(() => []),
+    ]);
+    console.log(`[RAG] Connections warmed in ${Date.now() - start}ms`);
+  } catch (err) {
+    console.error('[RAG] Warmup error:', err.message);
+  }
 }
 
 export async function ingestDocument(text, metadata = {}) {
