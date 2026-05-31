@@ -23,7 +23,7 @@ export function createSTTStream() {
     language: 'en',
     smart_format: true,
     interim_results: true,
-    utterance_end_ms: 700,   // FALLBACK only now (was 1000)
+    utterance_end_ms: 1000,  // FALLBACK only now. Deepgram requires >= 1000.
     vad_events: true,
     endpointing: 300,        // speech_final fires ~300ms after speech stops
     encoding: 'mulaw',
