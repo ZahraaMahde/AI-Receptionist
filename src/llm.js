@@ -31,7 +31,7 @@ export async function* streamLLMResponse(userMessage, ragContext, conversationHi
     messages,
     stream: true,
     temperature: 0.3,          // Lower temp for factual accuracy
-    max_tokens: 300,           // Keep responses concise for phone
+    max_tokens: 80,           // Keep responses concise for phone
     presence_penalty: 0.1,     // Slight penalty to avoid repetition
   });
 
@@ -66,7 +66,8 @@ function buildSystemMessage(ragContext) {
   prompt += '- Never mention that you are AI unless directly asked\n';
   prompt += '- Use natural filler words occasionally (well, sure, of course)\n';
   prompt += '- Don\'t use markdown, bullet points, or formatting — this is spoken\n';
-
+  prompt += '- Reply in one short sentence unless the caller asks for details.\n';
+  
   if (ragContext) {
     prompt += '\n## Company knowledge base (use this to answer questions):\n';
     prompt += ragContext;
