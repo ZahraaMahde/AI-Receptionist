@@ -27,12 +27,21 @@ export function handleMediaStream(ws) {
   let isAssistantSpeaking = false;
   let hasInterruptedCurrentSpeech = false;
   let hasSentOpeningGreeting = false;
+  let isOpeningGreetingActive = false;
+  let openingGreetingFallbackTimer = null;
 
   sttStream = createSTTStream();
   ttsStream = createTTSStream();
 
   ttsStream.onAudio((audioBuffer) => {
     if (!streamSid || !ws) return;
+
+    // The greeting must be heard before caller audio is processed.
+    // Once the first greeting audio is sent to Twilio, we know the bot spoke first.
+    if (isOpeningGreetingActive) {
+      hasSentOpeningGreeting = true;
+    }
+
     isAssistantSpeaking = true;
 
     console.log(`[Twilio] Sending OpenAI TTS audio: ${audioBuffer.length} bytes`);
@@ -46,6 +55,17 @@ export function handleMediaStream(ws) {
         payload: base64Audio,
       },
     }));
+  });
+
+
+  ttsStream.onFinal(() => {
+    if (isOpeningGreetingActive) {
+      isOpeningGreetingActive = false;
+      hasSentOpeningGreeting = true;
+      clearTimeout(openingGreetingFallbackTimer);
+      openingGreetingFallbackTimer = null;
+      console.log('[Session] Opening greeting completed');
+    }
   });
 
   sttStream.onUtteranceEnd(async (transcript) => {
@@ -64,21 +84,34 @@ export function handleMediaStream(ws) {
 
   sttStream.onTranscript(({ text, fullText, isFinal }) => {
     const heardText = (text || fullText || '').trim();
+    const wordCount = heardText.split(/\s+/).filter(Boolean).length;
 
-    // Barge-in: stop assistant audio as soon as the caller starts speaking,
-    // not only after Deepgram returns a final transcript. Humans interrupt.
-    // Apparently we built phones so they could do this more efficiently.
-    if ((isAssistantSpeaking || isProcessing) && heardText && !hasInterruptedCurrentSpeech) {
+    // Do not allow the caller or speaker echo to interrupt the opening greeting.
+    // The first thing the caller should hear is the greeting, not a half-greeting
+    // followed by chaos, which software is always tragically eager to provide.
+    if (!hasSentOpeningGreeting || isOpeningGreetingActive) {
+      return;
+    }
+
+    // Noise gate: avoid stopping the assistant for tiny STT fragments like
+    // "uh", "oh", or echo leakage. A real barge-in usually has either a final
+    // transcript or at least a couple of words.
+    const looksLikeRealSpeech = isFinal || wordCount >= 2 || heardText.length >= 8;
+
+    if ((isAssistantSpeaking || isProcessing) && looksLikeRealSpeech && !hasInterruptedCurrentSpeech) {
       console.log('[Session] Barge-in detected — interrupting TTS');
       hasInterruptedCurrentSpeech = true;
-      isAssistantSpeaking = false;
-      ttsStream.interrupt();
 
-      if (streamSid) {
-        ws.send(JSON.stringify({
-          event: 'clear',
-          streamSid,
-        }));
+      if (isAssistantSpeaking) {
+        isAssistantSpeaking = false;
+        ttsStream.interrupt();
+
+        if (streamSid) {
+          ws.send(JSON.stringify({
+            event: 'clear',
+            streamSid,
+          }));
+        }
       }
     }
   });
@@ -110,7 +143,7 @@ export function handleMediaStream(ws) {
         case 'media': {
           // Do not listen to the caller until the greeting has been queued.
           // This prevents the first user "hi" from being processed before the bot speaks.
-          if (!hasSentOpeningGreeting) {
+          if (!hasSentOpeningGreeting || isOpeningGreetingActive) {
             break;
           }
 
@@ -251,6 +284,8 @@ export function handleMediaStream(ws) {
       sttStream = null;
     }
 
+    clearTimeout(openingGreetingFallbackTimer);
+
     if (ttsStream) {
       ttsStream.close();
       ttsStream = null;
@@ -361,6 +396,9 @@ export function handleMediaStream(ws) {
   async function sendOpeningGreeting() {
     const greeting = `Hello, ${config.companyName}. How can I help?`;
 
+    isOpeningGreetingActive = true;
+    hasSentOpeningGreeting = false;
+
     await ttsStream.waitUntilReady();
 
     console.log(`[Session] Sending opening greeting: "${greeting}"`);
@@ -374,7 +412,15 @@ export function handleMediaStream(ws) {
     ttsStream.sendText(greeting);
     await ttsStream.finish();
 
-    isAssistantSpeaking = false;
-    hasSentOpeningGreeting = true;
+    // Safety fallback: if ElevenLabs does not emit isFinal for any reason,
+    // allow the call to continue after the greeting has had time to play.
+    clearTimeout(openingGreetingFallbackTimer);
+    openingGreetingFallbackTimer = setTimeout(() => {
+      if (isOpeningGreetingActive) {
+        isOpeningGreetingActive = false;
+        hasSentOpeningGreeting = true;
+        console.log('[Session] Opening greeting released by fallback timer');
+      }
+    }, 2500);
   }
 }
