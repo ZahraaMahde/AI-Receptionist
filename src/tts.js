@@ -14,6 +14,7 @@ export function createTTSStream() {
   let isConnecting = false;
   let textBuffer = '';
   let flushTimeout = null;
+  let readyResolvers = [];
 
   function connect() {
     if (isClosed) return;
@@ -47,6 +48,9 @@ export function createTTSStream() {
 
       isReady = true;
       isConnecting = false;
+
+      readyResolvers.forEach(({ resolve }) => resolve());
+      readyResolvers = [];
 
       if (textBuffer) {
         scheduleFlush(30);
@@ -85,6 +89,9 @@ export function createTTSStream() {
       console.error('[TTS] WebSocket error:', err.message);
       isReady = false;
       isConnecting = false;
+
+      readyResolvers.forEach(({ reject }) => reject(err));
+      readyResolvers = [];
     });
 
     ws.on('close', (code, reason) => {
@@ -96,6 +103,31 @@ export function createTTSStream() {
       if (!isClosed && textBuffer) {
         setTimeout(() => connect(), 100);
       }
+    });
+  }
+
+  function waitUntilReady(timeoutMs = 5000) {
+    if (canSend()) return Promise.resolve();
+
+    connect();
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        readyResolvers = readyResolvers.filter((item) => item.resolve !== wrappedResolve);
+        reject(new Error('[TTS] Timed out waiting for ElevenLabs WebSocket'));
+      }, timeoutMs);
+
+      function wrappedResolve() {
+        clearTimeout(timeout);
+        resolve();
+      }
+
+      function wrappedReject(err) {
+        clearTimeout(timeout);
+        reject(err);
+      }
+
+      readyResolvers.push({ resolve: wrappedResolve, reject: wrappedReject });
     });
   }
 
@@ -149,8 +181,21 @@ export function createTTSStream() {
       }
     },
 
-    finish() {
+    async waitUntilReady(timeoutMs = 5000) {
+      return waitUntilReady(timeoutMs);
+    },
+
+    async finish() {
       clearTimeout(flushTimeout);
+
+      if (!canSend()) {
+        try {
+          await waitUntilReady();
+        } catch (err) {
+          console.warn(err.message || '[TTS] Tried to finish, but WebSocket is not ready');
+          return;
+        }
+      }
 
       if (textBuffer) {
         flush();
