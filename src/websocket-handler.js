@@ -204,7 +204,7 @@ export function handleMediaStream(ws) {
       } else {
         const progressivePrefix = getProgressivePrefix(transcript);
 
-        if (progressivePrefix && !hasInterruptedCurrentSpeech) {
+        if (progressivePrefix && shouldUseProgressivePrefix(transcript)) {
           console.log(`[Progressive] Sending prefix: "${progressivePrefix}"`);
           ttsStream.sendText(progressivePrefix);
           fullResponse += progressivePrefix;
@@ -422,27 +422,29 @@ export function handleMediaStream(ws) {
     return null;
   }
 
+  function shouldUseProgressivePrefix(transcript) {
+    const words = transcript.trim().split(/\s+/).filter(Boolean);
+
+    return words.length >= 6;
+  }
+
   function getProgressivePrefix(transcript) {
     const text = transcript.toLowerCase();
 
-    if (/\b(?:firewall|cybersecurity|security|secure|utm)\b/i.test(text)) {
-      return 'Yes, we can help with cybersecurity solutions.';
+    if (
+      /\b(?:server|cloud|database|migration|application|firewall|security|secure|cybersecurity|internet|network|router|switch|wifi|wi-fi)\b/i.test(
+        text
+      )
+    ) {
+      return 'I understand your request.';
     }
 
-    if (/\b(?:server|cloud|database|migration|data migration|application)\b/i.test(text)) {
-      return 'Yes, we can help with server and cloud solutions.';
+    if (/\b(?:price|pricing|cost|quote|budget|how much)\b/i.test(text)) {
+      return 'I can help with that.';
     }
 
-    if (/\b(?:internet|network|wifi|wi-fi|router|switch|connection|connect)\b/i.test(text)) {
-      return 'Yes, we can help with networking solutions.';
-    }
-
-    if (/\b(?:price|pricing|cost|how much)\b/i.test(text)) {
-      return 'I can help with the next step for pricing.';
-    }
-
-    if (/\b(?:sales|contact|reach|phone|email)\b/i.test(text)) {
-      return 'Yes, I can help you reach the right team.';
+    if (/\b(?:contact|sales|phone|email|reach)\b/i.test(text)) {
+      return 'Certainly.';
     }
 
     return null;
