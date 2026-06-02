@@ -20,6 +20,22 @@ export function handleMediaStream(ws) {
   let conversationHistory = [];
   let callTranscript = [];
 
+  // BARGE-IN IS DISABLED BY DEFAULT.
+  // On a normal phone line with no echo cancellation, Deepgram hears the bot's
+  // OWN voice and transcribes it ("Hello?" in your logs = the greeting echoing
+  // back). With barge-in on, that phantom transcript kills the bot mid-sentence
+  // and gets processed as a fake question. Until proper echo suppression is in
+  // place, leaving this off gives clean, complete replies.
+  // Set to true ONLY if your audio path has echo cancellation.
+  const ENABLE_BARGE_IN = false;
+
+  const ECHO_GUARD_MS = 1500;
+
+  // Timestamp until which we treat the line as "bot is talking" — any STT
+  // result arriving before this is the bot's own audio echoing back, so we
+  // drop it instead of replying to ourselves.
+  let botSpeakingUntil = 0;
+
   sttStream = createSTTStream();
   ttsStream = createTTSStream();
 
@@ -41,6 +57,11 @@ export function handleMediaStream(ws) {
   ttsStream.onAudio((audioBuffer) => {
     if (!streamSid || !ws) return;
 
+    // Mark that the bot is actively producing audio. Used to suppress echo:
+    // any "transcript" arriving while/just after we speak is the bot hearing
+    // itself, not the caller.
+    botSpeakingUntil = Date.now() + ECHO_GUARD_MS;
+
     console.log(`[Twilio] Sending TTS audio: ${audioBuffer.length} bytes`);
 
     const base64Audio = audioBuffer.toString('base64');
@@ -56,6 +77,14 @@ export function handleMediaStream(ws) {
 
   sttStream.onUtteranceEnd(async (transcript) => {
     if (!transcript || isProcessing) return;
+
+    // ECHO SUPPRESSION: if the bot is (or just was) speaking, this transcript
+    // is almost certainly the bot's own voice bleeding into the mic. Drop it.
+    if (Date.now() < botSpeakingUntil) {
+      console.log(`[Session] Ignored (echo while bot speaking): "${transcript}"`);
+      sttStream.resetTranscript();
+      return;
+    }
 
     console.log(`[Session] Processing: "${transcript}"`);
     isProcessing = true;
@@ -119,8 +148,11 @@ export function handleMediaStream(ws) {
 
   sttStream.onTranscript(({ isFinal }) => {
     // Barge-in: the caller is speaking while audio is playing — either the
-    // opening greeting or a mid-turn response. Stop the TTS and clear Twilio's
-    // buffered audio so our voice cuts out immediately.
+    // Barge-in: the caller speaking over the bot. Only act on this if it's
+    // explicitly enabled. (Requires echo cancellation on the audio path, or it
+    // trips on the bot's own voice — see ENABLE_BARGE_IN note above.)
+    if (!ENABLE_BARGE_IN) return;
+
     if ((isProcessing || greetingPlaying) && isFinal) {
       console.log('[Session] Barge-in detected — interrupting TTS');
       greetingPlaying = false;
