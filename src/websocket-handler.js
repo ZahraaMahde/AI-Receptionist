@@ -15,8 +15,16 @@ export function handleMediaStream(ws) {
   let sttStream = null;
   let ttsStream = null;
   let isProcessing = false;
+  let pendingTranscript = null;
   let conversationHistory = [];
+  let callerMemory = {
+    name: null,
+    company: null,
+    needs: [],
+  };
   let callTranscript = [];
+  let isAssistantSpeaking = false;
+  let hasInterruptedCurrentSpeech = false;
   let hasSentOpeningGreeting = false;
 
   sttStream = createSTTStream();
@@ -24,6 +32,7 @@ export function handleMediaStream(ws) {
 
   ttsStream.onAudio((audioBuffer) => {
     if (!streamSid || !ws) return;
+    isAssistantSpeaking = true;
 
     console.log(`[Twilio] Sending OpenAI TTS audio: ${audioBuffer.length} bytes`);
 
@@ -39,69 +48,29 @@ export function handleMediaStream(ws) {
   });
 
   sttStream.onUtteranceEnd(async (transcript) => {
-    if (!transcript || isProcessing) return;
+    if (!transcript) return;
 
-    console.log(`[Session] Processing: "${transcript}"`);
-    isProcessing = true;
-
-    const turnStart = Date.now();
-    callTranscript.push({
-      role: 'user',
-      text: transcript,
-      timestamp: Date.now(),
-    });
-
-    try {
-      const { context, cached, cachedAnswer, embedding } =
-        await retrieveContext(transcript);
-    
-      let fullResponse = '';
-
-      if (cached && cachedAnswer) {
-        console.log('[Session] Cache hit — skipping LLM');
-        fullResponse = cachedAnswer;
-        ttsStream.sendText(cachedAnswer);
-      } else {
-        const llmStream = streamLLMResponse(transcript, context, conversationHistory);
-
-        for await (const chunk of llmStream) {
-          fullResponse += chunk;
-          ttsStream.sendText(chunk);
-        }
-
-        if (embedding) {
-          cacheAnswer(transcript, fullResponse, embedding).catch(() => {});
-        }
-      }
-
-      await ttsStream.finish();
-
-      conversationHistory.push(
-        { role: 'user', content: transcript },
-        { role: 'assistant', content: fullResponse }
-      );
-
-      callTranscript.push({
-        role: 'assistant',
-        text: fullResponse,
-        timestamp: Date.now(),
-      });
-
-      console.log(`[Session] Turn complete in ${Date.now() - turnStart}ms`);
-    } catch (err) {
-      console.error('[Session] Processing error:', err);
-
-      const fallback = "I'm sorry, I didn't quite catch that. Could you repeat your question?";
-      ttsStream.sendText(fallback);
-      await ttsStream.finish();
-    } finally {
-      isProcessing = false;
+    if (isProcessing) {
+      // The caller interrupted while we were still generating/speaking.
+      // Keep the latest caller message and process it as soon as this turn exits.
+      pendingTranscript = transcript;
+      console.log(`[Session] Queued interrupted utterance: "${transcript}"`);
+      return;
     }
+
+    await processTranscript(transcript);
   });
 
-  sttStream.onTranscript(({ isFinal }) => {
-    if (isProcessing && isFinal) {
+  sttStream.onTranscript(({ text, fullText, isFinal }) => {
+    const heardText = (text || fullText || '').trim();
+
+    // Barge-in: stop assistant audio as soon as the caller starts speaking,
+    // not only after Deepgram returns a final transcript. Humans interrupt.
+    // Apparently we built phones so they could do this more efficiently.
+    if ((isAssistantSpeaking || isProcessing) && heardText && !hasInterruptedCurrentSpeech) {
       console.log('[Session] Barge-in detected — interrupting TTS');
+      hasInterruptedCurrentSpeech = true;
+      isAssistantSpeaking = false;
       ttsStream.interrupt();
 
       if (streamSid) {
@@ -123,15 +92,15 @@ export function handleMediaStream(ws) {
           break;
 
         case 'start':
-        streamSid = message.start.streamSid;
-        callSid = message.start.callSid;
-        console.log(`[Twilio] Stream started: ${streamSid}`);
-      
-        sendOpeningGreeting().catch((err) => {
-          console.error('[Session] Opening greeting error:', err);
-        });
-      
-        break;
+          streamSid = message.start.streamSid;
+          callSid = message.start.callSid;
+          console.log(`[Twilio] Stream started: ${streamSid}`);
+
+          sendOpeningGreeting().catch((err) => {
+            console.error('[Session] Opening greeting error:', err);
+          });
+
+          break;
 
         case 'media': {
           // Do not listen to the caller until the greeting has been queued.
@@ -171,6 +140,104 @@ export function handleMediaStream(ws) {
     cleanup();
   });
 
+  async function processTranscript(transcript) {
+    if (!transcript) return;
+
+    console.log(`[Session] Processing: "${transcript}"`);
+    isProcessing = true;
+    hasInterruptedCurrentSpeech = false;
+    updateCallerMemory(transcript);
+
+    const turnStart = Date.now();
+    callTranscript.push({
+      role: 'user',
+      text: transcript,
+      timestamp: Date.now(),
+    });
+
+    try {
+      let fullResponse = '';
+
+      if (isNameQuestion(transcript)) {
+        fullResponse = callerMemory.name
+          ? `Your name is ${callerMemory.name}.`
+          : "I don't think you told me your name yet.";
+        ttsStream.sendText(fullResponse);
+      } else {
+        const { context, cached, cachedAnswer, embedding } =
+          await retrieveContext(transcript);
+
+        if (cached && cachedAnswer) {
+          console.log('[Session] Cache hit — skipping LLM');
+          fullResponse = cachedAnswer;
+          ttsStream.sendText(cachedAnswer);
+        } else {
+          const llmStream = streamLLMResponse(
+            transcript,
+            context,
+            conversationHistory,
+            callerMemory
+          );
+
+          for await (const chunk of llmStream) {
+            // If the caller barged in, stop sending the old answer.
+            if (hasInterruptedCurrentSpeech) break;
+
+            fullResponse += chunk;
+            ttsStream.sendText(chunk);
+          }
+
+          if (embedding && fullResponse && !hasInterruptedCurrentSpeech) {
+            cacheAnswer(transcript, fullResponse, embedding).catch(() => {});
+          }
+        }
+      }
+
+      if (!hasInterruptedCurrentSpeech) {
+        await ttsStream.finish();
+      }
+
+      isAssistantSpeaking = false;
+
+      if (fullResponse) {
+        conversationHistory.push(
+          { role: 'user', content: transcript },
+          { role: 'assistant', content: fullResponse }
+        );
+
+        // Keep enough history for memory without letting the prompt grow forever.
+        conversationHistory = conversationHistory.slice(-16);
+
+        callTranscript.push({
+          role: 'assistant',
+          text: fullResponse,
+          timestamp: Date.now(),
+        });
+      }
+
+      console.log(`[Session] Turn complete in ${Date.now() - turnStart}ms`);
+    } catch (err) {
+      console.error('[Session] Processing error:', err);
+
+      const fallback = "I'm sorry, I didn't quite catch that. Could you repeat your question?";
+      ttsStream.sendText(fallback);
+      await ttsStream.finish();
+      isAssistantSpeaking = false;
+    } finally {
+      isProcessing = false;
+
+      if (pendingTranscript) {
+        const nextTranscript = pendingTranscript;
+        pendingTranscript = null;
+        setImmediate(() => {
+          processTranscript(nextTranscript).catch((err) => {
+            console.error('[Session] Pending transcript error:', err);
+          });
+        });
+      }
+    }
+  }
+
   function cleanup() {
     if (sttStream) {
       sttStream.close();
@@ -202,6 +269,49 @@ export function handleMediaStream(ws) {
     }
   }
 
+  function updateCallerMemory(transcript) {
+    const text = transcript.trim();
+
+    const namePatterns = [
+      /\b(?:my name is|i am|i'm|this is)\s+([a-zA-Z][a-zA-Z' -]{1,40})\b/i,
+      /\b(?:call me)\s+([a-zA-Z][a-zA-Z' -]{1,40})\b/i,
+    ];
+
+    for (const pattern of namePatterns) {
+      const match = text.match(pattern);
+      if (match?.[1]) {
+        const rawName = match[1]
+          .replace(/[.?!,].*$/, '')
+          .replace(/\b(?:and|from|with|calling|looking|need|want)\b.*$/i, '')
+          .trim();
+
+        if (rawName && rawName.split(/\s+/).length <= 3) {
+          callerMemory.name = rawName
+            .split(/\s+/)
+            .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+            .join(' ');
+          console.log(`[Memory] Caller name remembered: ${callerMemory.name}`);
+        }
+      }
+    }
+
+    const companyMatch = text.match(/\b(?:my company is|company is|i have a company(?: called| named)?|we are)\s+([^.!?]{2,80})/i);
+    if (companyMatch?.[1]) {
+      callerMemory.company = companyMatch[1].trim();
+      console.log(`[Memory] Caller company remembered: ${callerMemory.company}`);
+    }
+
+    const needKeywords = /\b(?:need|want|looking for|interested in|connect|setup|install|service|hardware|software|network|internet)\b/i;
+    if (needKeywords.test(text)) {
+      callerMemory.needs.push(text);
+      callerMemory.needs = callerMemory.needs.slice(-5);
+    }
+  }
+
+  function isNameQuestion(transcript) {
+    return /\b(?:what(?:'s| is) my name|do you remember my name|who am i)\b/i.test(transcript);
+  }
+
   async function sendOpeningGreeting() {
     const greeting = `Hello, ${config.companyName}. How can I help?`;
 
@@ -218,6 +328,7 @@ export function handleMediaStream(ws) {
     ttsStream.sendText(greeting);
     await ttsStream.finish();
 
+    isAssistantSpeaking = false;
     hasSentOpeningGreeting = true;
   }
 }
