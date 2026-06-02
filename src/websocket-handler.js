@@ -14,6 +14,7 @@ export function handleMediaStream(ws) {
   let callSid = null;
   let sttStream = null;
   let ttsStream = null;
+
   let isProcessing = false;
   let pendingTranscript = null;
   let conversationHistory = [];
@@ -28,6 +29,7 @@ export function handleMediaStream(ws) {
   let callTranscript = [];
   let isAssistantSpeaking = false;
   let hasInterruptedCurrentSpeech = false;
+
   let hasSentOpeningGreeting = false;
   let isOpeningGreetingActive = false;
   let openingGreetingFallbackTimer = null;
@@ -61,8 +63,10 @@ export function handleMediaStream(ws) {
     if (isOpeningGreetingActive) {
       isOpeningGreetingActive = false;
       hasSentOpeningGreeting = true;
+
       clearTimeout(openingGreetingFallbackTimer);
       openingGreetingFallbackTimer = null;
+
       console.log('[Session] Opening greeting completed');
     }
   });
@@ -124,11 +128,12 @@ export function handleMediaStream(ws) {
         case 'start':
           streamSid = message.start.streamSid;
           callSid = message.start.callSid;
+
           console.log(`[Twilio] Stream started: ${streamSid}`);
 
-          warmUp().catch((err) =>
-            console.error('[RAG] Warmup failed:', err.message)
-          );
+          warmUp().catch((err) => {
+            console.error('[RAG] Warmup failed:', err.message);
+          });
 
           sendOpeningGreeting().catch((err) => {
             console.error('[Session] Opening greeting error:', err);
@@ -199,32 +204,22 @@ export function handleMediaStream(ws) {
 
       if (directResponse) {
         fullResponse = directResponse;
+
         console.log('[FastIntent] Direct response — skipping RAG and LLM');
         ttsStream.sendText(fullResponse);
       } else {
-        const progressivePrefix = getProgressivePrefix(transcript);
-
-        if (progressivePrefix && shouldUseProgressivePrefix(transcript)) {
-          console.log(`[Progressive] Sending prefix: "${progressivePrefix}"`);
-          ttsStream.sendText(progressivePrefix);
-          fullResponse += progressivePrefix;
-        }
-
         const { context, cached, cachedAnswer, embedding } =
           await retrieveContext(transcript);
+
+        if (hasInterruptedCurrentSpeech) {
+          return;
+        }
 
         if (cached && cachedAnswer) {
           console.log('[Session] Cache hit — skipping LLM');
 
-          if (!hasInterruptedCurrentSpeech) {
-            const cachedText = removeDuplicatePrefix(
-              cachedAnswer,
-              progressivePrefix
-            );
-
-            fullResponse += cachedText ? ` ${cachedText}` : '';
-            ttsStream.sendText(cachedText || cachedAnswer);
-          }
+          fullResponse = cachedAnswer;
+          ttsStream.sendText(cachedAnswer);
         } else {
           const llmStream = streamLLMResponse(
             transcript,
@@ -276,6 +271,7 @@ export function handleMediaStream(ws) {
 
       ttsStream.sendText(fallback);
       await ttsStream.finish();
+
       isAssistantSpeaking = false;
     } finally {
       isProcessing = false;
@@ -313,9 +309,8 @@ export function handleMediaStream(ws) {
         if (rawName && rawName.split(/\s+/).length <= 3) {
           callerMemory.name = rawName
             .split(/\s+/)
-            .map(
-              (part) =>
-                part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()
+            .map((part) =>
+              part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()
             )
             .join(' ');
 
@@ -350,7 +345,7 @@ export function handleMediaStream(ws) {
     }
 
     const needKeywords =
-      /\b(?:need|want|looking for|interested in|connect|setup|install|service|hardware|software|network|internet|server|firewall|security|cybersecurity|cloud|database|migration)\b/i;
+      /\b(?:need|want|looking for|interested in|connect|setup|install|service|hardware|software|network|internet|server|firewall|security|cybersecurity|cloud|database|migration|data recovery|backup)\b/i;
 
     if (needKeywords.test(text)) {
       callerMemory.needs.push(text);
@@ -420,54 +415,6 @@ export function handleMediaStream(ws) {
     }
 
     return null;
-  }
-
-  function shouldUseProgressivePrefix(transcript) {
-    const words = transcript.trim().split(/\s+/).filter(Boolean);
-
-    return words.length >= 6;
-  }
-
-  function getProgressivePrefix(transcript) {
-    const text = transcript.toLowerCase();
-
-    if (
-      /\b(?:server|cloud|database|migration|application|firewall|security|secure|cybersecurity|internet|network|router|switch|wifi|wi-fi)\b/i.test(
-        text
-      )
-    ) {
-      return 'I understand your request.';
-    }
-
-    if (/\b(?:price|pricing|cost|quote|budget|how much)\b/i.test(text)) {
-      return 'I can help with that.';
-    }
-
-    if (/\b(?:contact|sales|phone|email|reach)\b/i.test(text)) {
-      return 'Certainly.';
-    }
-
-    return null;
-  }
-
-  function removeDuplicatePrefix(answer, prefix) {
-    if (!answer || !prefix) return answer;
-
-    const normalize = (value) =>
-      value
-        .toLowerCase()
-        .replace(/[^\p{L}\p{N}\s]/gu, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-    const normalizedAnswer = normalize(answer);
-    const normalizedPrefix = normalize(prefix);
-
-    if (normalizedAnswer.startsWith(normalizedPrefix)) {
-      return answer.slice(prefix.length).trim();
-    }
-
-    return answer;
   }
 
   async function sendOpeningGreeting() {
