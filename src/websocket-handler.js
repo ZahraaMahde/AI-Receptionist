@@ -202,6 +202,18 @@ export function handleMediaStream(ws) {
         console.log('[FastIntent] Direct response — skipping RAG and LLM');
         ttsStream.sendText(fullResponse);
       } else {
+        const filler = getFillerResponse(transcript);
+
+        if (filler && !hasInterruptedCurrentSpeech) {
+          console.log(`[Filler] Sending filler response: "${filler}"`);
+          ttsStream.sendText(filler);
+          await ttsStream.finish();
+        }
+
+        if (hasInterruptedCurrentSpeech) {
+          return;
+        }
+
         const { context, cached, cachedAnswer, embedding } =
           await retrieveContext(transcript);
 
@@ -334,12 +346,64 @@ export function handleMediaStream(ws) {
     }
 
     const needKeywords =
-      /\b(?:need|want|looking for|interested in|connect|setup|install|service|hardware|software|network|internet)\b/i;
+      /\b(?:need|want|looking for|interested in|connect|setup|install|service|hardware|software|network|internet|server|firewall|security|cybersecurity)\b/i;
 
     if (needKeywords.test(text)) {
       callerMemory.needs.push(text);
       callerMemory.needs = callerMemory.needs.slice(-5);
     }
+  }
+
+  function getFillerResponse(transcript) {
+    const text = transcript.toLowerCase().trim();
+
+    const normalized = text
+      .replace(/[^\p{L}\p{N}\s]/gu, '')
+      .replace(/\s+/g, ' ');
+
+    const noFillerPhrases = [
+      'hi',
+      'hello',
+      'hey',
+      'good morning',
+      'morning',
+      'good afternoon',
+      'afternoon',
+      'good evening',
+      'evening',
+      'bonjour',
+      'salut',
+      'salam',
+      'marhaba',
+      'مرحبا',
+      'اهلا',
+      'أهلا',
+      'السلام عليكم',
+      'thanks',
+      'thank you',
+      'bye',
+      'goodbye',
+    ];
+
+    if (noFillerPhrases.includes(normalized)) {
+      return null;
+    }
+
+    if (
+      /\b(?:what(?:'s| is) my name|do you remember my name|who am i|what(?:'s| is) my position|what do i work as)\b/i.test(
+        text
+      )
+    ) {
+      return null;
+    }
+
+    const fillers = [
+      'Let me check that.',
+      'One moment.',
+      'Sure, let me confirm.',
+    ];
+
+    return fillers[Math.floor(Math.random() * fillers.length)];
   }
 
   function getDirectResponse(transcript) {
