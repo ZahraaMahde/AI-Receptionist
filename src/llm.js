@@ -113,3 +113,4 @@ export async function generateQuickResponse(userMessage, type = 'greeting') {
 
   return response.choices[0].message.content;
 }
+ 
