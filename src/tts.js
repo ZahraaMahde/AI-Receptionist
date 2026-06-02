@@ -9,13 +9,13 @@ export function createTTSStream() {
 
   let ws = null;
   let audioCallback = null;
+  let finalCallback = null;
   let isReady = false;
   let isClosed = false;
   let isConnecting = false;
   let textBuffer = '';
   let flushTimeout = null;
   let reconnectTimer = null;
-  let keepAliveTimer = null;
   let readyResolvers = [];
 
   function connect() {
@@ -46,20 +46,20 @@ export function createTTSStream() {
           use_speaker_boost: true,
         },
         generation_config: {
-          // Smaller first chunks reduce time-to-first-audio for phone calls.
-          chunk_length_schedule: [80, 120, 160, 220],
+          // Keep chunks small enough for low latency, but not so small that
+          // the voice sounds broken or incomplete.
+          chunk_length_schedule: [120, 160, 250, 290],
         },
       }));
 
       isReady = true;
       isConnecting = false;
-      startKeepAlive();
 
       readyResolvers.forEach(({ resolve }) => resolve());
       readyResolvers = [];
 
       if (textBuffer) {
-        scheduleFlush(10);
+        scheduleFlush(30);
       }
     });
 
@@ -85,6 +85,7 @@ export function createTTSStream() {
 
         if (message.isFinal) {
           console.log('[TTS] Stream complete');
+          if (finalCallback) finalCallback();
         }
       } catch (err) {
         console.error('[TTS] Parse error:', err.message);
@@ -105,46 +106,23 @@ export function createTTSStream() {
       isReady = false;
       isConnecting = false;
       ws = null;
-      stopKeepAlive();
 
-      // Keep the socket warm for the whole call. If ElevenLabs closes the
-      // stream after a final audio event, reconnect immediately so the next
-      // user turn does not pay the reconnect cost.
+      // Safe warm reconnect: ElevenLabs stream-input normally closes after a
+      // finalized response. Reconnect immediately after normal close so the
+      // next turn usually has a ready socket, without skipping finalization.
       if (!isClosed) {
-        scheduleReconnect(100);
+        scheduleReconnect(120);
       }
     });
   }
 
-  function scheduleReconnect(delayMs = 100) {
-    if (isClosed || reconnectTimer) return;
+  function scheduleReconnect(delayMs = 120) {
+    if (isClosed || reconnectTimer || isConnecting) return;
 
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       connect();
     }, delayMs);
-  }
-
-  function startKeepAlive() {
-    stopKeepAlive();
-
-    // Prevent idle websocket shutdown during quiet moments of a call.
-    keepAliveTimer = setInterval(() => {
-      if (canSend() && !textBuffer) {
-        try {
-          ws.send(JSON.stringify({ text: ' ' }));
-        } catch (err) {
-          console.warn('[TTS] Keepalive failed:', err.message);
-        }
-      }
-    }, 15000);
-  }
-
-  function stopKeepAlive() {
-    if (keepAliveTimer) {
-      clearInterval(keepAliveTimer);
-      keepAliveTimer = null;
-    }
   }
 
   function waitUntilReady(timeoutMs = 5000) {
@@ -176,7 +154,7 @@ export function createTTSStream() {
     return !isClosed && isReady && ws && ws.readyState === WebSocket.OPEN;
   }
 
-  function scheduleFlush(delay = 60) {
+  function scheduleFlush(delay = 90) {
     clearTimeout(flushTimeout);
     flushTimeout = setTimeout(() => {
       flush();
@@ -189,7 +167,7 @@ export function createTTSStream() {
     if (!canSend()) {
       console.log('[TTS] WebSocket not ready, reconnecting before flush');
       connect();
-      scheduleFlush(80);
+      scheduleFlush(120);
       return;
     }
 
@@ -215,12 +193,12 @@ export function createTTSStream() {
       const sentenceEnd = /[.!?]\s*$/;
       const commaEnd = /,\s*$/;
 
-      if (sentenceEnd.test(textBuffer) || textBuffer.length > 110) {
+      if (sentenceEnd.test(textBuffer) || textBuffer.length > 140) {
         flush();
-      } else if (commaEnd.test(textBuffer) && textBuffer.length > 35) {
+      } else if (commaEnd.test(textBuffer) && textBuffer.length > 45) {
         flush();
       } else {
-        scheduleFlush(60);
+        scheduleFlush(90);
       }
     },
 
@@ -229,11 +207,7 @@ export function createTTSStream() {
     },
 
     async finish() {
-      // Keep ElevenLabs open. Do not send { text: '' } here, because that
-      // finalizes the stream and creates reconnect latency on the next turn.
       clearTimeout(flushTimeout);
-
-      if (!textBuffer) return;
 
       if (!canSend()) {
         try {
@@ -244,32 +218,46 @@ export function createTTSStream() {
         }
       }
 
-      flush();
+      if (textBuffer) {
+        flush();
+      }
+
+      if (!canSend()) {
+        console.warn('[TTS] Tried to finish, but WebSocket is not ready');
+        return;
+      }
+
+      // Important: this finalizes ElevenLabs generation. Without it, the last
+      // part of a sentence can be delayed or never produced consistently.
+      ws.send(JSON.stringify({ text: '' }));
+      isReady = false;
     },
 
     onAudio(callback) {
       audioCallback = callback;
     },
 
+    onFinal(callback) {
+      finalCallback = callback;
+    },
+
     interrupt() {
       clearTimeout(flushTimeout);
       textBuffer = '';
 
-      // Fastest reliable cancellation for ElevenLabs stream-input: close the
-      // current stream, clear Twilio's buffer in websocket-handler, then warm a
-      // new TTS socket immediately for the next answer.
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.close(1000, 'barge-in');
-      } else {
-        scheduleReconnect(50);
       }
+
+      isReady = false;
+      isConnecting = false;
+      scheduleReconnect(80);
     },
 
     close() {
       isClosed = true;
       clearTimeout(flushTimeout);
       clearTimeout(reconnectTimer);
-      stopKeepAlive();
       textBuffer = '';
 
       if (ws && ws.readyState === WebSocket.OPEN) {
