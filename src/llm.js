@@ -14,11 +14,11 @@ const openai = new OpenAI({ apiKey: config.openai.apiKey });
  * @param {Array} conversationHistory - Previous turns in the call
  * @returns {AsyncGenerator<string>} - Yields text chunks
  */
-export async function* streamLLMResponse(userMessage, ragContext, conversationHistory = []) {
+export async function* streamLLMResponse(userMessage, ragContext, conversationHistory = [], callerMemory = {}) {
   const start = Date.now();
   let firstToken = true;
 
-  const systemMessage = buildSystemMessage(ragContext);
+  const systemMessage = buildSystemMessage(ragContext, callerMemory);
 
   const messages = [
     { role: 'system', content: systemMessage },
@@ -56,7 +56,7 @@ export async function* streamLLMResponse(userMessage, ragContext, conversationHi
 /**
  * Build the system message with RAG context injected
  */
-function buildSystemMessage(ragContext) {
+function buildSystemMessage(ragContext, callerMemory = {}) {
   let prompt = config.systemPrompt;
 
   prompt += '\n\n## Important guidelines:\n';
@@ -66,11 +66,24 @@ function buildSystemMessage(ragContext) {
   prompt += '- Never mention that you are AI unless directly asked\n';
   prompt += '- Use natural filler words occasionally (well, sure, of course)\n';
   prompt += '- Don\'t use markdown, bullet points, or formatting — this is spoken\n';
+  prompt += '- Use the conversation history and caller memory to remember personal details shared during this call, such as the caller name, company, needs, and preferences.\n';
+  prompt += '- If the caller asks about something they already told you in this call, answer from the conversation memory, not from the company knowledge base.\n';
+
+  const memoryLines = [];
+  if (callerMemory.name) memoryLines.push(`Caller name: ${callerMemory.name}`);
+  if (callerMemory.company) memoryLines.push(`Caller company: ${callerMemory.company}`);
+  if (callerMemory.needs?.length) memoryLines.push(`Caller needs: ${callerMemory.needs.join('; ')}`);
+
+  if (memoryLines.length) {
+    prompt += '\n## Caller memory from this call:\n';
+    prompt += memoryLines.join('\n');
+    prompt += '\n';
+  }
 
   if (ragContext) {
     prompt += '\n## Company knowledge base (use this to answer questions):\n';
     prompt += ragContext;
-    prompt += '\n\nAnswer ONLY based on the above context. If the information is not in the context, say you don\'t have that information and offer to transfer to a team member.';
+    prompt += '\n\nFor company/service questions, answer based on the company knowledge above. For caller-specific questions, like their name or what they already told you, use caller memory and conversation history. If company information is not in the knowledge base, say you do not have that information and offer to transfer to a team member.';
   }
 
   return prompt;
