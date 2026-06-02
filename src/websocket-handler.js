@@ -202,16 +202,12 @@ export function handleMediaStream(ws) {
         console.log('[FastIntent] Direct response — skipping RAG and LLM');
         ttsStream.sendText(fullResponse);
       } else {
-        const filler = getFillerResponse(transcript);
+        const progressivePrefix = getProgressivePrefix(transcript);
 
-        if (filler && !hasInterruptedCurrentSpeech) {
-          console.log(`[Filler] Sending filler response: "${filler}"`);
-          ttsStream.sendText(filler);
-          await ttsStream.finish();
-        }
-
-        if (hasInterruptedCurrentSpeech) {
-          return;
+        if (progressivePrefix && !hasInterruptedCurrentSpeech) {
+          console.log(`[Progressive] Sending prefix: "${progressivePrefix}"`);
+          ttsStream.sendText(progressivePrefix);
+          fullResponse += progressivePrefix;
         }
 
         const { context, cached, cachedAnswer, embedding } =
@@ -219,8 +215,16 @@ export function handleMediaStream(ws) {
 
         if (cached && cachedAnswer) {
           console.log('[Session] Cache hit — skipping LLM');
-          fullResponse = cachedAnswer;
-          ttsStream.sendText(cachedAnswer);
+
+          if (!hasInterruptedCurrentSpeech) {
+            const cachedText = removeDuplicatePrefix(
+              cachedAnswer,
+              progressivePrefix
+            );
+
+            fullResponse += cachedText ? ` ${cachedText}` : '';
+            ttsStream.sendText(cachedText || cachedAnswer);
+          }
         } else {
           const llmStream = streamLLMResponse(
             transcript,
@@ -346,64 +350,12 @@ export function handleMediaStream(ws) {
     }
 
     const needKeywords =
-      /\b(?:need|want|looking for|interested in|connect|setup|install|service|hardware|software|network|internet|server|firewall|security|cybersecurity)\b/i;
+      /\b(?:need|want|looking for|interested in|connect|setup|install|service|hardware|software|network|internet|server|firewall|security|cybersecurity|cloud|database|migration)\b/i;
 
     if (needKeywords.test(text)) {
       callerMemory.needs.push(text);
       callerMemory.needs = callerMemory.needs.slice(-5);
     }
-  }
-
-  function getFillerResponse(transcript) {
-    const text = transcript.toLowerCase().trim();
-
-    const normalized = text
-      .replace(/[^\p{L}\p{N}\s]/gu, '')
-      .replace(/\s+/g, ' ');
-
-    const noFillerPhrases = [
-      'hi',
-      'hello',
-      'hey',
-      'good morning',
-      'morning',
-      'good afternoon',
-      'afternoon',
-      'good evening',
-      'evening',
-      'bonjour',
-      'salut',
-      'salam',
-      'marhaba',
-      'مرحبا',
-      'اهلا',
-      'أهلا',
-      'السلام عليكم',
-      'thanks',
-      'thank you',
-      'bye',
-      'goodbye',
-    ];
-
-    if (noFillerPhrases.includes(normalized)) {
-      return null;
-    }
-
-    if (
-      /\b(?:what(?:'s| is) my name|do you remember my name|who am i|what(?:'s| is) my position|what do i work as)\b/i.test(
-        text
-      )
-    ) {
-      return null;
-    }
-
-    const fillers = [
-      'Let me check that.',
-      'One moment.',
-      'Sure, let me confirm.',
-    ];
-
-    return fillers[Math.floor(Math.random() * fillers.length)];
   }
 
   function getDirectResponse(transcript) {
@@ -468,6 +420,52 @@ export function handleMediaStream(ws) {
     }
 
     return null;
+  }
+
+  function getProgressivePrefix(transcript) {
+    const text = transcript.toLowerCase();
+
+    if (/\b(?:firewall|cybersecurity|security|secure|utm)\b/i.test(text)) {
+      return 'Yes, we can help with cybersecurity solutions.';
+    }
+
+    if (/\b(?:server|cloud|database|migration|data migration|application)\b/i.test(text)) {
+      return 'Yes, we can help with server and cloud solutions.';
+    }
+
+    if (/\b(?:internet|network|wifi|wi-fi|router|switch|connection|connect)\b/i.test(text)) {
+      return 'Yes, we can help with networking solutions.';
+    }
+
+    if (/\b(?:price|pricing|cost|how much)\b/i.test(text)) {
+      return 'I can help with the next step for pricing.';
+    }
+
+    if (/\b(?:sales|contact|reach|phone|email)\b/i.test(text)) {
+      return 'Yes, I can help you reach the right team.';
+    }
+
+    return null;
+  }
+
+  function removeDuplicatePrefix(answer, prefix) {
+    if (!answer || !prefix) return answer;
+
+    const normalize = (value) =>
+      value
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const normalizedAnswer = normalize(answer);
+    const normalizedPrefix = normalize(prefix);
+
+    if (normalizedAnswer.startsWith(normalizedPrefix)) {
+      return answer.slice(prefix.length).trim();
+    }
+
+    return answer;
   }
 
   async function sendOpeningGreeting() {
