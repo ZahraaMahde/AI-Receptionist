@@ -1,7 +1,7 @@
 import { createSTTStream } from './stt.js';
 import { createTTSStream } from './tts.js';
 import { streamLLMResponse } from './llm.js';
-import { retrieveContext, cacheAnswer } from './rag.js';
+import { retrieveContext, cacheAnswer, warmUp } from './rag.js';
 import { config } from './config.js';
 
 /**
@@ -20,6 +20,7 @@ export function handleMediaStream(ws) {
   let callerMemory = {
     name: null,
     company: null,
+    position: null,
     needs: [],
   };
   let callTranscript = [];
@@ -96,6 +97,10 @@ export function handleMediaStream(ws) {
           callSid = message.start.callSid;
           console.log(`[Twilio] Stream started: ${streamSid}`);
 
+          // Warm Supabase/OpenAI connections in parallel with the greeting.
+          // This reduces first real question latency without delaying call start.
+          warmUp().catch((err) => console.error('[RAG] Warmup failed:', err.message));
+
           sendOpeningGreeting().catch((err) => {
             console.error('[Session] Opening greeting error:', err);
           });
@@ -158,10 +163,12 @@ export function handleMediaStream(ws) {
     try {
       let fullResponse = '';
 
-      if (isNameQuestion(transcript)) {
-        fullResponse = callerMemory.name
-          ? `Your name is ${callerMemory.name}.`
-          : "I don't think you told me your name yet.";
+      const directResponse = getDirectResponse(transcript);
+
+      if (directResponse) {
+        // Direct answers skip RAG and LLM completely. This is the fastest path
+        // for memory questions, greetings, thanks, and goodbyes.
+        fullResponse = directResponse;
         ttsStream.sendText(fullResponse);
       } else {
         const { context, cached, cachedAnswer, embedding } =
@@ -301,6 +308,19 @@ export function handleMediaStream(ws) {
       console.log(`[Memory] Caller company remembered: ${callerMemory.company}`);
     }
 
+    const positionMatch = text.match(/\b(?:i am|i'm|i work as|my position is|my role is)\s+(?:an?\s+)?([a-zA-Z][a-zA-Z' -]{2,50})\b/i);
+    if (positionMatch?.[1]) {
+      const rawPosition = positionMatch[1]
+        .replace(/[.?!,].*$/, '')
+        .replace(/\b(?:and|at|for|with|from|looking|need|want)\b.*$/i, '')
+        .trim();
+
+      if (rawPosition && !/^(here|tara|zahra|zahraa)$/i.test(rawPosition)) {
+        callerMemory.position = rawPosition.toLowerCase();
+        console.log(`[Memory] Caller position remembered: ${callerMemory.position}`);
+      }
+    }
+
     const needKeywords = /\b(?:need|want|looking for|interested in|connect|setup|install|service|hardware|software|network|internet)\b/i;
     if (needKeywords.test(text)) {
       callerMemory.needs.push(text);
@@ -308,8 +328,34 @@ export function handleMediaStream(ws) {
     }
   }
 
-  function isNameQuestion(transcript) {
-    return /\b(?:what(?:'s| is) my name|do you remember my name|who am i)\b/i.test(transcript);
+  function getDirectResponse(transcript) {
+    const text = transcript.trim();
+
+    if (/\b(?:what(?:'s| is) my name|do you remember my name|who am i)\b/i.test(text)) {
+      return callerMemory.name
+        ? `Your name is ${callerMemory.name}.`
+        : "I don't think you told me your name yet.";
+    }
+
+    if (/\b(?:what(?:'s| is) my (?:position|role|job)|what do i work as|where do i work)\b/i.test(text)) {
+      return callerMemory.position
+        ? `You mentioned that you work as ${callerMemory.position}.`
+        : "I don't think you told me your position yet.";
+    }
+
+    if (/^(hi|hello|hey|good morning|good afternoon|good evening)[.! ]*$/i.test(text)) {
+      return `Hello${callerMemory.name ? ` ${callerMemory.name}` : ''}. How can I help?`;
+    }
+
+    if (/\b(?:thank you|thanks|appreciate it)\b/i.test(text)) {
+      return "You're welcome.";
+    }
+
+    if (/\b(?:bye|goodbye|see you)\b/i.test(text)) {
+      return `Goodbye${callerMemory.name ? `, ${callerMemory.name}` : ''}. Have a great day.`;
+    }
+
+    return null;
   }
 
   async function sendOpeningGreeting() {
