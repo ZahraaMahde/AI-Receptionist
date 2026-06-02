@@ -31,7 +31,7 @@ export async function* streamLLMResponse(userMessage, ragContext, conversationHi
     messages,
     stream: true,
     temperature: 0.3,          // Lower temp for factual accuracy
-    max_tokens: 300,           // Keep responses concise for phone
+    max_tokens: 90,            // Lower latency: keep spoken responses concise
     presence_penalty: 0.1,     // Slight penalty to avoid repetition
   });
 
@@ -60,11 +60,11 @@ function buildSystemMessage(ragContext, callerMemory = {}) {
   let prompt = config.systemPrompt;
 
   prompt += '\n\n## Important guidelines:\n';
-  prompt += '- Keep responses SHORT and natural for phone conversation (1-3 sentences)\n';
+  prompt += '- Keep responses very short and natural for phone conversation (usually 1 sentence, maximum 2)\n';
   prompt += '- Speak in a warm, professional tone\n';
   prompt += '- If asked to transfer, say you will connect them\n';
   prompt += '- Never mention that you are AI unless directly asked\n';
-  prompt += '- Use natural filler words occasionally (well, sure, of course)\n';
+  prompt += '- Avoid long introductions. Answer directly first, then offer transfer or follow-up if useful.\n';
   prompt += '- Don\'t use markdown, bullet points, or formatting — this is spoken\n';
   prompt += '- Use the conversation history and caller memory to remember personal details shared during this call, such as the caller name, company, needs, and preferences.\n';
   prompt += '- If the caller asks about something they already told you in this call, answer from the conversation memory, not from the company knowledge base.\n';
@@ -72,6 +72,7 @@ function buildSystemMessage(ragContext, callerMemory = {}) {
   const memoryLines = [];
   if (callerMemory.name) memoryLines.push(`Caller name: ${callerMemory.name}`);
   if (callerMemory.company) memoryLines.push(`Caller company: ${callerMemory.company}`);
+  if (callerMemory.position) memoryLines.push(`Caller position: ${callerMemory.position}`);
   if (callerMemory.needs?.length) memoryLines.push(`Caller needs: ${callerMemory.needs.join('; ')}`);
 
   if (memoryLines.length) {
