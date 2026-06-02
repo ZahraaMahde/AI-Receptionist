@@ -17,6 +17,7 @@ export function handleMediaStream(ws) {
   let isProcessing = false;
   let conversationHistory = [];
   let callTranscript = [];
+  let hasSentOpeningGreeting = false;
 
   sttStream = createSTTStream();
   ttsStream = createTTSStream();
@@ -133,6 +134,12 @@ export function handleMediaStream(ws) {
         break;
 
         case 'media': {
+          // Do not listen to the caller until the greeting has been queued.
+          // This prevents the first user "hi" from being processed before the bot speaks.
+          if (!hasSentOpeningGreeting) {
+            break;
+          }
+
           const audioData = Buffer.from(message.media.payload, 'base64');
           if (sttStream) {
             sttStream.send(audioData);
@@ -196,17 +203,21 @@ export function handleMediaStream(ws) {
   }
 
   async function sendOpeningGreeting() {
-  const greeting = `Hello, ${config.companyName}. How can I help ?`;
+    const greeting = `Hello, ${config.companyName}. How can I help?`;
 
-  console.log(`[Session] Sending opening greeting: "${greeting}"`);
+    await ttsStream.waitUntilReady();
 
-  callTranscript.push({
-    role: 'assistant',
-    text: greeting,
-    timestamp: Date.now(),
-  });
+    console.log(`[Session] Sending opening greeting: "${greeting}"`);
 
-  ttsStream.sendText(greeting);
-  await ttsStream.finish();
-}
+    callTranscript.push({
+      role: 'assistant',
+      text: greeting,
+      timestamp: Date.now(),
+    });
+
+    ttsStream.sendText(greeting);
+    await ttsStream.finish();
+
+    hasSentOpeningGreeting = true;
+  }
 }
