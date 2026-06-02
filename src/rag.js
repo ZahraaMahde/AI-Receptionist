@@ -204,3 +204,4 @@ function splitIntoChunks(text, maxChars = 2000, overlap = 200) {
 
   return chunks;
 }
+ 
