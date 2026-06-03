@@ -2,6 +2,7 @@ import { createSTTStream } from './stt.js';
 import { createTTSStream } from './tts.js';
 import { streamLLMResponse } from './llm.js';
 import { retrieveContext, cacheAnswer, warmUp } from './rag.js';
+import { getFAQResponse } from './faq-router.js';
 import { config } from './config.js';
 
 /**
@@ -208,35 +209,44 @@ export function handleMediaStream(ws) {
         console.log('[FastIntent] Direct response — skipping RAG and LLM');
         ttsStream.sendText(fullResponse);
       } else {
-        const { context, cached, cachedAnswer, embedding } =
-          await retrieveContext(transcript);
+        const faqResponse = getFAQResponse(transcript);
 
-        if (hasInterruptedCurrentSpeech) {
-          return;
-        }
+        if (faqResponse) {
+          fullResponse = faqResponse;
 
-        if (cached && cachedAnswer) {
-          console.log('[Session] Cache hit — skipping LLM');
-
-          fullResponse = cachedAnswer;
-          ttsStream.sendText(cachedAnswer);
+          console.log('[FAQ] Matched FAQ — skipping RAG and LLM');
+          ttsStream.sendText(fullResponse);
         } else {
-          const llmStream = streamLLMResponse(
-            transcript,
-            context,
-            conversationHistory,
-            callerMemory
-          );
+          const { context, cached, cachedAnswer, embedding } =
+            await retrieveContext(transcript);
 
-          for await (const chunk of llmStream) {
-            if (hasInterruptedCurrentSpeech) break;
-
-            fullResponse += chunk;
-            ttsStream.sendText(chunk);
+          if (hasInterruptedCurrentSpeech) {
+            return;
           }
 
-          if (embedding && fullResponse && !hasInterruptedCurrentSpeech) {
-            cacheAnswer(transcript, fullResponse, embedding).catch(() => {});
+          if (cached && cachedAnswer) {
+            console.log('[Session] Cache hit — skipping LLM');
+
+            fullResponse = cachedAnswer;
+            ttsStream.sendText(cachedAnswer);
+          } else {
+            const llmStream = streamLLMResponse(
+              transcript,
+              context,
+              conversationHistory,
+              callerMemory
+            );
+
+            for await (const chunk of llmStream) {
+              if (hasInterruptedCurrentSpeech) break;
+
+              fullResponse += chunk;
+              ttsStream.sendText(chunk);
+            }
+
+            if (embedding && fullResponse && !hasInterruptedCurrentSpeech) {
+              cacheAnswer(transcript, fullResponse, embedding).catch(() => {});
+            }
           }
         }
       }
