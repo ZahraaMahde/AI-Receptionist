@@ -1,66 +1,75 @@
 import WebSocket from 'ws';
 import { config } from './config.js';
 
-const ELEVENLABS_WS_URL = 'wss://api.elevenlabs.io/v1/text-to-speech';
-
 export function createTTSStream() {
-  const voiceId = config.elevenlabs.voiceId;
-  const wsUrl = `${ELEVENLABS_WS_URL}/${voiceId}/stream-input?model_id=eleven_turbo_v2_5&output_format=ulaw_8000`;
+  const apiKey =
+    config.elevenlabs?.apiKey ||
+    config.elevenLabs?.apiKey ||
+    process.env.ELEVENLABS_API_KEY;
+
+  const voiceId =
+    config.elevenlabs?.voiceId ||
+    config.elevenLabs?.voiceId ||
+    process.env.ELEVENLABS_VOICE_ID;
+
+  const modelId =
+    config.elevenlabs?.modelId ||
+    config.elevenLabs?.modelId ||
+    process.env.ELEVENLABS_MODEL_ID ||
+    'eleven_flash_v2_5';
+
+  const outputFormat =
+    config.elevenlabs?.outputFormat ||
+    config.elevenLabs?.outputFormat ||
+    process.env.ELEVENLABS_OUTPUT_FORMAT ||
+    'ulaw_8000';
 
   let ws = null;
-  let audioCallback = null;
-  let finalCallback = null;
   let isReady = false;
-  let isClosed = false;
-  let isConnecting = false;
-  let textBuffer = '';
-  let flushTimeout = null;
-  let reconnectTimer = null;
+  let isClosedByUser = false;
+  let audioHandler = null;
+  let finalHandler = null;
+
   let readyResolvers = [];
+  let finalResolvers = [];
+  let keepAliveTimer = null;
+  let reconnecting = false;
 
   function connect() {
-    if (isClosed || isConnecting) return;
-    if (ws && ws.readyState === WebSocket.OPEN) return;
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
 
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-
-    isConnecting = true;
     isReady = false;
 
-    ws = new WebSocket(wsUrl, {
-      headers: {
-        'xi-api-key': config.elevenlabs.apiKey,
-      },
-    });
+    const url =
+      `wss://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream-input` +
+      `?model_id=${modelId}&output_format=${outputFormat}`;
+
+    ws = new WebSocket(url);
 
     ws.on('open', () => {
+      isReady = true;
+      reconnecting = false;
+
       console.log('[TTS] ElevenLabs WebSocket connected');
 
-      ws.send(JSON.stringify({
+      sendRaw({
         text: ' ',
-        xi_api_key: config.elevenlabs.apiKey,
+        xi_api_key: apiKey,
         voice_settings: {
           stability: 0.5,
-          similarity_boost: 0.75,
-          use_speaker_boost: true,
+          similarity_boost: 0.8,
         },
         generation_config: {
-          // Keep chunks small enough for low latency, but not so small that
-          // the voice sounds broken or incomplete.
-          chunk_length_schedule: [120, 160, 250, 290],
+          chunk_length_schedule: [50, 80, 120],
         },
-      }));
+      });
 
-      isReady = true;
-      isConnecting = false;
+      startKeepAlive();
 
-      readyResolvers.forEach(({ resolve }) => resolve());
+      readyResolvers.forEach((resolve) => resolve());
       readyResolvers = [];
-
-      if (textBuffer) {
-        scheduleFlush(30);
-      }
     });
 
     ws.on('message', (data) => {
@@ -68,239 +77,233 @@ export function createTTSStream() {
         const message = JSON.parse(data.toString());
 
         if (message.audio) {
-          console.log(`[TTS] Audio received: ${message.audio.length} chars`);
-
           const audioBuffer = Buffer.from(message.audio, 'base64');
 
-          if (audioCallback) {
-            audioCallback(audioBuffer);
-          } else {
-            console.warn('[TTS] Audio received but no audioCallback registered');
+          console.log(`[TTS] Audio received: ${message.audio.length} chars`);
+
+          if (audioHandler) {
+            audioHandler(audioBuffer);
+          }
+        }
+
+        if (message.isFinal || message.is_final) {
+          console.log('[TTS] Stream complete');
+
+          finalResolvers.forEach((resolve) => resolve());
+          finalResolvers = [];
+
+          if (finalHandler) {
+            finalHandler();
           }
         }
 
         if (message.error) {
-          console.error('[TTS] ElevenLabs error:', message.error);
-        }
-
-        if (message.isFinal) {
-          console.log('[TTS] Stream complete');
-          if (finalCallback) finalCallback();
+          handleElevenLabsError(message.error);
         }
       } catch (err) {
-        console.error('[TTS] Parse error:', err.message);
+        console.error('[TTS] Message parse error:', err.message);
       }
+    });
+
+    ws.on('close', (code, reasonBuffer) => {
+      const reason = reasonBuffer?.toString?.() || '';
+
+      isReady = false;
+      stopKeepAlive();
+
+      console.log(`[TTS] WebSocket closed: ${code} ${reason}`);
+
+      resolveFinals();
+
+      if (isClosedByUser) {
+        return;
+      }
+
+      if (
+        code === 1008 ||
+        reason.includes('input_timeout_exceeded') ||
+        reason.includes('Have not received a new text input')
+      ) {
+        console.log('[TTS] ElevenLabs idle timeout — will reconnect on next text');
+        return;
+      }
+
+      scheduleReconnect();
     });
 
     ws.on('error', (err) => {
-      console.error('[TTS] WebSocket error:', err.message);
-      isReady = false;
-      isConnecting = false;
+      const message = err?.message || '';
 
-      readyResolvers.forEach(({ reject }) => reject(err));
-      readyResolvers = [];
-    });
-
-    ws.on('close', (code, reason) => {
-      console.log(`[TTS] WebSocket closed: ${code} ${reason?.toString() || ''}`);
-      isReady = false;
-      isConnecting = false;
-      ws = null;
-
-      // Safe warm reconnect: ElevenLabs stream-input normally closes after a
-      // finalized response. Reconnect immediately after normal close so the
-      // next turn usually has a ready socket, without skipping finalization.
-      if (!isClosed) {
-        scheduleReconnect(120);
+      if (message.includes('input_timeout_exceeded')) {
+        console.log('[TTS] ElevenLabs idle timeout — ignored');
+        return;
       }
+
+      console.error('[TTS] ElevenLabs error:', message);
     });
   }
 
-  function scheduleReconnect(delayMs = 120) {
-    if (isClosed || reconnectTimer || isConnecting) return;
+  function handleElevenLabsError(error) {
+    const message =
+      typeof error === 'string'
+        ? error
+        : error?.message || JSON.stringify(error);
 
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null;
-      connect();
-    }, delayMs);
-  }
-
-  function waitUntilReady(timeoutMs = 5000) {
-    if (canSend()) return Promise.resolve();
-
-    connect();
-
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        readyResolvers = readyResolvers.filter((item) => item.resolve !== wrappedResolve);
-        reject(new Error('[TTS] Timed out waiting for ElevenLabs WebSocket'));
-      }, timeoutMs);
-
-      function wrappedResolve() {
-        clearTimeout(timeout);
-        resolve();
-      }
-
-      function wrappedReject(err) {
-        clearTimeout(timeout);
-        reject(err);
-      }
-
-      readyResolvers.push({ resolve: wrappedResolve, reject: wrappedReject });
-    });
-  }
-
-  function canSend() {
-    return !isClosed && isReady && ws && ws.readyState === WebSocket.OPEN;
-  }
-
-  function scheduleFlush(delay = 90) {
-    clearTimeout(flushTimeout);
-    flushTimeout = setTimeout(() => {
-      flush();
-    }, delay);
-  }
-
-  function flush() {
-    if (!textBuffer) return;
-
-    if (!canSend()) {
-      console.log('[TTS] WebSocket not ready, reconnecting before flush');
-      connect();
-      scheduleFlush(120);
+    if (message.includes('input_timeout_exceeded')) {
+      console.log('[TTS] ElevenLabs idle timeout — ignored');
       return;
     }
 
-    const text = textBuffer;
-    textBuffer = '';
+    console.error('[TTS] ElevenLabs error:', message);
+  }
 
-    ws.send(JSON.stringify({
-      text,
-      try_trigger_generation: true,
-    }));
+  function scheduleReconnect() {
+    if (reconnecting || isClosedByUser) return;
 
-    console.log(`[TTS] Sent: "${text.substring(0, 50)}..."`);
+    reconnecting = true;
+
+    setTimeout(() => {
+      if (!isClosedByUser) {
+        connect();
+      }
+    }, 250);
+  }
+
+  function sendRaw(payload) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+
+    ws.send(JSON.stringify(payload));
+    return true;
+  }
+
+  async function waitUntilReady() {
+    if (ws?.readyState === WebSocket.OPEN && isReady) {
+      return;
+    }
+
+    connect();
+
+    return new Promise((resolve) => {
+      readyResolvers.push(resolve);
+    });
+  }
+
+  function startKeepAlive() {
+    stopKeepAlive();
+
+    keepAliveTimer = setInterval(() => {
+      if (ws?.readyState === WebSocket.OPEN) {
+        sendRaw({ text: ' ' });
+      }
+    }, 15000);
+  }
+
+  function stopKeepAlive() {
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
+  }
+
+  function resolveFinals() {
+    finalResolvers.forEach((resolve) => resolve());
+    finalResolvers = [];
   }
 
   connect();
 
   return {
-    sendText(text) {
-      if (!text || isClosed) return;
-
-      textBuffer += text;
-
-      const sentenceEnd = /[.!?]\s*$/;
-      const commaEnd = /,\s*$/;
-
-      if (sentenceEnd.test(textBuffer) || textBuffer.length > 140) {
-        flush();
-      } else if (commaEnd.test(textBuffer) && textBuffer.length > 45) {
-        flush();
-      } else {
-        scheduleFlush(90);
-      }
+    onAudio(handler) {
+      audioHandler = handler;
     },
 
-    async waitUntilReady(timeoutMs = 5000) {
-      return waitUntilReady(timeoutMs);
+    onFinal(handler) {
+      finalHandler = handler;
+    },
+
+    async waitUntilReady() {
+      await waitUntilReady();
+    },
+
+    async sendText(text) {
+      if (!text || !text.trim()) return;
+
+      await waitUntilReady();
+
+      const safeText = text.endsWith(' ') ? text : `${text} `;
+
+      console.log(`[TTS] Sent: "${safeText.slice(0, 50)}..."`);
+
+      sendRaw({
+        text: safeText,
+        try_trigger_generation: true,
+      });
     },
 
     async finish() {
-      clearTimeout(flushTimeout);
+      await waitUntilReady();
 
-      if (!canSend()) {
-        try {
-          await waitUntilReady();
-        } catch (err) {
-          console.warn(err.message || '[TTS] Tried to finish, but WebSocket is not ready');
-          return;
-        }
-      }
+      return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          resolveFinals();
+          resolve();
+        }, 2500);
 
-      if (textBuffer) {
-        flush();
-      }
+        finalResolvers.push(() => {
+          clearTimeout(timeout);
+          resolve();
+        });
 
-      if (!canSend()) {
-        console.warn('[TTS] Tried to finish, but WebSocket is not ready');
-        return;
-      }
-
-      // Important: this finalizes ElevenLabs generation. Without it, the last
-      // part of a sentence can be delayed or never produced consistently.
-      ws.send(JSON.stringify({ text: '' }));
-      isReady = false;
-    },
-
-    onAudio(callback) {
-      audioCallback = callback;
-    },
-
-    onFinal(callback) {
-      finalCallback = callback;
+        // Important:
+        // flush:true asks ElevenLabs to generate buffered text.
+        // Do NOT send { text: "" } here, because that closes the stream.
+        sendRaw({
+          text: ' ',
+          flush: true,
+        });
+      });
     },
 
     interrupt() {
-      clearTimeout(flushTimeout);
-      textBuffer = '';
+      console.log('[TTS] Interrupt requested');
 
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close(1000, 'barge-in');
+      resolveFinals();
+
+      if (ws?.readyState === WebSocket.OPEN || ws?.readyState === WebSocket.CONNECTING) {
+        try {
+          ws.close(1000, 'barge-in');
+        } catch {
+          // ignore
+        }
       }
 
       isReady = false;
-      isConnecting = false;
-      scheduleReconnect(80);
+      stopKeepAlive();
+
+      if (!isClosedByUser) {
+        setTimeout(() => connect(), 100);
+      }
     },
 
     close() {
-      isClosed = true;
-      clearTimeout(flushTimeout);
-      clearTimeout(reconnectTimer);
-      textBuffer = '';
+      isClosedByUser = true;
+      stopKeepAlive();
+      resolveFinals();
 
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close();
+      if (ws) {
+        try {
+          // Only close the socket when the call ends.
+          sendRaw({ text: '' });
+          ws.close(1000, 'call-ended');
+        } catch {
+          // ignore
+        }
       }
 
       ws = null;
       isReady = false;
-      isConnecting = false;
     },
   };
-}
-
-export async function synthesizeSpeech(text) {
-  const start = Date.now();
-
-  const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${config.elevenlabs.voiceId}?output_format=ulaw_8000`,
-    {
-      method: 'POST',
-      headers: {
-        'xi-api-key': config.elevenlabs.apiKey,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        text,
-        model_id: 'eleven_turbo_v2_5',
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75,
-        },
-      }),
-    }
-  );
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`[TTS] ElevenLabs REST error ${response.status}: ${errorText}`);
-  }
-
-  const audioBuffer = Buffer.from(await response.arrayBuffer());
-
-  console.log(`[TTS] One-shot synthesis in ${Date.now() - start}ms (${audioBuffer.length} bytes)`);
-
-  return audioBuffer;
 }
