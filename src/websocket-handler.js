@@ -187,6 +187,11 @@ export function handleMediaStream(ws) {
 
     console.log(`[Session] Processing: "${transcript}"`);
 
+    if (isTranscriptFragment(transcript)) {
+      console.log('[Session] Ignoring transcript fragment');
+      return;
+    }
+
     isProcessing = true;
     hasInterruptedCurrentSpeech = false;
 
@@ -315,7 +320,7 @@ export function handleMediaStream(ws) {
     const text = transcript.trim();
 
     const namePatterns = [
-      /\b(?:my name is|i am|i'm|this is)\s+([a-zA-Z][a-zA-Z' -]{1,40})\b/i,
+      /\b(?:my name is|this is)\s+([a-zA-Z][a-zA-Z' -]{1,40})\b/i,
       /\b(?:call me)\s+([a-zA-Z][a-zA-Z' -]{1,40})\b/i,
     ];
 
@@ -378,6 +383,16 @@ export function handleMediaStream(ws) {
   function getDirectResponse(transcript) {
     const text = transcript.trim();
 
+    const nameIntro = text.match(
+      /\b(?:my name is|this is|call me)\s+([a-zA-Z][a-zA-Z' -]{1,40})/i
+    );
+
+    if (nameIntro) {
+      const name = callerMemory.name || cleanName(nameIntro[1]);
+
+      return `Nice to meet you, ${name}. How can I help you today?`;
+    }
+
     const normalized = text
       .toLowerCase()
       .trim()
@@ -437,6 +452,47 @@ export function handleMediaStream(ws) {
     }
 
     return null;
+  }
+
+  function isTranscriptFragment(transcript) {
+    const text = transcript.trim().toLowerCase();
+    const wordCount = text.split(/\s+/).filter(Boolean).length;
+
+    if (!text) return true;
+
+    if (
+      wordCount <= 2 &&
+      /^(and|or|but|also|then|with|between|for|to|from|about)$/i.test(text)
+    ) {
+      return true;
+    }
+
+    if (
+      wordCount <= 3 &&
+      /^(and|or|but|also|then|with|between|for|to|from|about)\b/i.test(text)
+    ) {
+      return true;
+    }
+
+    if (/\b(?:and|or|with|between|for|to|from|about)\s*$/i.test(text)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function cleanName(value) {
+    const cleaned = value
+      .replace(/[.?!,].*$/, '')
+      .replace(/\b(?:and|from|with|calling|looking|need|want|have)\b.*$/i, '')
+      .trim();
+
+    return cleaned
+      .split(/\s+/)
+      .map((part) =>
+        part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()
+      )
+      .join(' ');
   }
 
   async function sendOpeningGreeting() {
