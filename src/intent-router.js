@@ -2,9 +2,7 @@ import OpenAI from 'openai';
 import { config } from './config.js';
 
 const openai = new OpenAI({
-  apiKey:
-    config.openai?.apiKey ||
-    process.env.OPENAI_API_KEY,
+  apiKey: config.openai.apiKey,
 });
 
 const INTENTS = {
@@ -27,9 +25,15 @@ export { INTENTS };
 
 export async function classifyFAQIntent(transcript) {
   const text = normalize(transcript);
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
 
   if (shouldForceRAG(text)) {
     console.log('[FAQ] Complex question detected — using RAG');
+    return INTENTS.UNKNOWN;
+  }
+
+  if (wordCount > 18 && !isClearFAQ(text)) {
+    console.log('[FAQ] Long/unclear question detected — using RAG');
     return INTENTS.UNKNOWN;
   }
 
@@ -43,15 +47,68 @@ export async function classifyFAQIntent(transcript) {
 }
 
 function shouldForceRAG(text) {
-  return (
-    /\b(?:explain|describe|compare|comparison|difference|different|details|detail|in detail|how does|how do you|which is better|recommend|recommendation|suggest|suggestion|best|choose|help me choose|advise|advice)\b/i.test(text) ||
-    /\b(?:difference between|compare between|what is better|what's better)\b/i.test(text)
-  );
+  return /\b(?:explain|describe|compare|comparison|difference|different|details|detail|in detail|how does|how do you|which is better|recommend|recommendation|suggest|suggestion|best|choose|help me choose|advise|advice|approach|strategy|plan|design)\b/i.test(text);
+}
+
+function isClearFAQ(text) {
+  return hasAny(text, [
+    'what services',
+    'what do you provide',
+    'where are you',
+    'where you are',
+    'where you at',
+    'phone',
+    'email',
+    'contact',
+    'sales',
+    'price',
+    'pricing',
+    'cost',
+    'do you provide',
+    'do you have',
+    'one internet line',
+    'internet everywhere',
+    'move data',
+    'data migration',
+    'firewall',
+    'cybersecurity',
+    'cyber security',
+  ]);
 }
 
 function classifyWithRules(text) {
-  // Network design / equipment requirement rules should come before location.
-  // Otherwise phrases like "office has 3 floors" may be wrongly treated as location.
+  // Keep this first. If the user asks for thinking, comparison, explanation,
+  // or advice, FAQ should stay quiet and let RAG handle it.
+  if (shouldForceRAG(text)) {
+    return INTENTS.UNKNOWN;
+  }
+
+  // Cybersecurity must come before networking.
+  // Otherwise "hackers attacking office network" gets misclassified as networking,
+  // because keywords are tiny gremlins with no judgment.
+  if (
+    hasAny(text, [
+      'firewall',
+      'cybersecurity',
+      'cyber security',
+      'security',
+      'secure',
+      'secure network',
+      'utm',
+      'hacker',
+      'hackers',
+      'attack',
+      'attacking',
+      'ransomware',
+      'threat',
+      'virus',
+      'malware',
+    ])
+  ) {
+    return INTENTS.CYBERSECURITY;
+  }
+
+  // Network design / equipment requirement.
   if (
     hasAny(text, [
       'what products do i need',
@@ -76,6 +133,8 @@ function classifyWithRules(text) {
       'office network',
       'company building',
       'building with',
+      'employees',
+      'users',
     ])
   ) {
     return INTENTS.NETWORK_EQUIPMENT_REQUIREMENTS;
@@ -144,23 +203,6 @@ function classifyWithRules(text) {
 
   if (
     hasAny(text, [
-      'firewall',
-      'cybersecurity',
-      'cyber security',
-      'security service',
-      'secure network',
-      'utm',
-      'hacker',
-      'hackers',
-      'attack',
-      'threat',
-    ])
-  ) {
-    return INTENTS.CYBERSECURITY;
-  }
-
-  if (
-    hasAny(text, [
       'data migration',
       'migration',
       'database',
@@ -170,6 +212,7 @@ function classifyWithRules(text) {
       'backup',
       'move data',
       'move my data',
+      'move them to cloud',
       'server failure',
       'lost files',
     ])
@@ -302,6 +345,7 @@ Return UNKNOWN if the caller asks for:
 - "suggest for me"
 - "what is best"
 - "help me choose"
+- "design a solution"
 
 FAQ is only for short factual questions.
 
