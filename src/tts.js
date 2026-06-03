@@ -36,6 +36,7 @@ export function createTTSStream() {
 
   let keepAliveTimer = null;
   let reconnecting = false;
+  let finishing = false;
 
   function connect() {
     if (
@@ -95,6 +96,7 @@ export function createTTSStream() {
         if (message.isFinal || message.is_final) {
           console.log('[TTS] Stream complete');
 
+          finishing = false;
           resolveFinals();
 
           if (finalHandler) {
@@ -114,6 +116,7 @@ export function createTTSStream() {
       const reason = reasonBuffer?.toString?.() || '';
 
       isReady = false;
+      finishing = false;
       stopKeepAlive();
 
       console.log(`[TTS] WebSocket closed: ${code} ${reason}`);
@@ -199,7 +202,7 @@ export function createTTSStream() {
     stopKeepAlive();
 
     keepAliveTimer = setInterval(() => {
-      if (ws?.readyState === WebSocket.OPEN) {
+      if (ws?.readyState === WebSocket.OPEN && !finishing) {
         sendRaw({ text: ' ' });
       }
     }, 15000);
@@ -250,19 +253,27 @@ export function createTTSStream() {
     async finish() {
       await waitUntilReady();
 
+      if (finishing) {
+        return new Promise((resolve) => {
+          finalResolvers.push(resolve);
+        });
+      }
+
+      finishing = true;
+
       return new Promise((resolve) => {
         const timeout = setTimeout(() => {
+          finishing = false;
           resolveFinals();
           resolve();
         }, 700);
 
         finalResolvers.push(() => {
           clearTimeout(timeout);
+          finishing = false;
           resolve();
         });
 
-        // flush:true asks ElevenLabs to generate buffered text.
-        // Do NOT send { text: "" } here, because that closes the stream.
         sendRaw({
           text: ' ',
           flush: true,
@@ -273,6 +284,7 @@ export function createTTSStream() {
     interrupt() {
       console.log('[TTS] Interrupt requested');
 
+      finishing = false;
       resolveFinals();
 
       if (
@@ -296,6 +308,7 @@ export function createTTSStream() {
 
     close() {
       isClosedByUser = true;
+      finishing = false;
 
       stopKeepAlive();
       resolveFinals();
