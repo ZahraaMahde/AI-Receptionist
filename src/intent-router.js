@@ -108,9 +108,7 @@ function classifyWithRules(text) {
     return INTENTS.UNKNOWN;
   }
 
-  // If multiple broad intents match, use RAG instead of guessing.
   if (uniqueMatches.length > 1) {
-    // Exception: security + networking should be treated as security.
     if (
       uniqueMatches.includes(INTENTS.CYBERSECURITY) &&
       uniqueMatches.includes(INTENTS.NETWORKING_SERVICES)
@@ -118,7 +116,10 @@ function classifyWithRules(text) {
       return INTENTS.CYBERSECURITY;
     }
 
-    console.log(`[FAQ] Multiple intents matched (${uniqueMatches.join(', ')}) — using RAG`);
+    console.log(
+      `[FAQ] Multiple intents matched (${uniqueMatches.join(', ')}) — using RAG`
+    );
+
     return INTENTS.UNKNOWN;
   }
 
@@ -126,7 +127,9 @@ function classifyWithRules(text) {
 }
 
 function shouldForceRAG(text) {
-  return /\b(?:explain|describe|compare|comparison|difference|different|details|detail|in detail|how does|how do you|which is better|recommend|recommendation|suggest|suggestion|best|choose|help me choose|advise|advice|approach|strategy|plan|design)\b/i.test(text);
+  return /\b(?:explain|describe|compare|comparison|difference|different|details|detail|in detail|how does|how do you|which is better|recommend|recommendation|suggest|suggestion|best|choose|help me choose|advise|advice|approach|strategy|plan|design|setup|home setup|work from home|what things|what products)\b/i.test(
+    text
+  );
 }
 
 function isClearFAQ(text) {
@@ -158,19 +161,36 @@ function isClearFAQ(text) {
 function isLikelyFragment(text) {
   const wordCount = getWordCount(text);
 
+  if (!text) {
+    return true;
+  }
+
   if (wordCount <= 2) {
     return true;
   }
 
   if (
-    /^(and|or|but|also|then|for|with|about|between|because)\b/i.test(text)
+    /^(and|or|but|also|then|for|with|about|between|because|to|from)\b/i.test(
+      text
+    )
   ) {
     return true;
   }
 
-  if (
-    /\b(?:and|or|with|between|for|to)\s*$/i.test(text)
-  ) {
+  if (/\b(?:and|or|with|between|for|to|from|about)\s*$/i.test(text)) {
+    return true;
+  }
+
+  const nounListOnly =
+    wordCount <= 8 &&
+    /(?:screen|screens|mouse|keyboard|router|routers|switch|switches|cable|cables|fiber|monitor|laptop|pc|computer)/i.test(
+      text
+    ) &&
+    !/\b(?:do you|what|how|where|need|provide|have|sell|cost|price|connect|setup)\b/i.test(
+      text
+    );
+
+  if (nounListOnly) {
     return true;
   }
 
@@ -179,11 +199,14 @@ function isLikelyFragment(text) {
 
 function matchesCybersecurity(text) {
   return hasAny(text, [
-    'firewall',
+    'do you provide firewall',
+    'do you have firewall',
+    'firewall solution',
+    'firewall solutions',
     'cybersecurity',
     'cyber security',
-    'security',
-    'secure',
+    'security service',
+    'security services',
     'secure network',
     'utm',
     'hacker',
@@ -199,30 +222,21 @@ function matchesCybersecurity(text) {
 
 function matchesNetworkEquipment(text) {
   return hasAny(text, [
-    'what products do i need',
-    'what product do i need',
-    'what things do i need',
-    'what equipment do i need',
-    'equipment needed',
-    'products needed',
+    'what equipment do i need for one internet line',
+    'what do i need for one internet line',
+    'what i need for one internet line',
     'connect one internet line',
     'one internet line',
-    'internet line',
-    'what i need for network',
-    'what do i need for network',
     'internet everywhere',
     'wifi everywhere',
     'internet on every floor',
     'wifi on every floor',
-    'three floors',
-    '3 floors',
-    'five floors',
-    '5 floors',
-    'office network',
-    'company building',
-    'building with',
-    'employees',
-    'users',
+    'three floors internet',
+    '3 floors internet',
+    'five floors internet',
+    '5 floors internet',
+    'office network setup',
+    'company building internet',
   ]);
 }
 
@@ -244,6 +258,7 @@ function matchesLocation(text) {
 function matchesContactSales(text) {
   return hasAny(text, [
     'phone',
+    'phone number',
     'number',
     'contact',
     'reach',
@@ -281,33 +296,34 @@ function matchesGeneralServices(text) {
 
 function matchesDataMigrationRecovery(text) {
   return hasAny(text, [
+    'do you provide data migration',
     'data migration',
-    'migration',
-    'database',
-    'cloud',
-    'disaster recovery',
-    'data recovery',
-    'backup',
     'move data',
     'move my data',
     'move them to cloud',
     'server failure',
     'lost files',
+    'disaster recovery',
+    'data recovery',
+    'backup service',
+    'cloud migration',
   ]);
 }
 
 function matchesNetworkingServices(text) {
   return hasAny(text, [
-    'network',
-    'networking',
-    'internet',
-    'wifi',
-    'wi fi',
-    'wi-fi',
-    'router',
-    'switch',
-    'fiber',
-    'cabling',
+    'do you provide networking',
+    'do you have networking',
+    'networking service',
+    'networking services',
+    'enterprise networking',
+    'wifi service',
+    'wi fi service',
+    'wi-fi service',
+    'structured cabling',
+    'fiber splicing',
+    'routing and switching',
+    'switching and routing',
     'vlan',
     'qos',
   ]);
@@ -315,24 +331,30 @@ function matchesNetworkingServices(text) {
 
 function matchesHardwareSupply(text) {
   return hasAny(text, [
-    'server',
+    'do you sell hardware',
+    'do you provide hardware',
+    'do you have hardware',
+    'hardware product',
+    'hardware products',
     'servers',
-    'storage',
-    'hardware',
+    'storage solutions',
     'ip telephony',
     'call management',
+    'enterprise wifi',
+    'enterprise wi fi',
+    'enterprise wi-fi',
   ]);
 }
 
 function matchesSystemIntegration(text) {
   return hasAny(text, [
     'system integration',
-    'infrastructure',
+    'infrastructure integration',
     'data center',
     'virtualization',
     'server setup',
     'high availability',
-    'deployment',
+    'network deployment',
   ]);
 }
 
@@ -352,13 +374,13 @@ function matchesAccessControl(text) {
 
 function matchesSupportMaintenance(text) {
   return hasAny(text, [
-    'support',
-    'maintenance',
     'managed it',
     'technical support',
     'sla',
     'remote support',
     'preventive maintenance',
+    'maintenance contract',
+    'maintenance contracts',
   ]);
 }
 
@@ -403,6 +425,9 @@ Return UNKNOWN if the caller asks for:
 - recommendation
 - detailed answer
 - advice
+- setup advice
+- home setup
+- work from home setup
 - "what is the difference"
 - "explain in detail"
 - "suggest for me"
@@ -412,7 +437,7 @@ Return UNKNOWN if the caller asks for:
 
 Return UNKNOWN if the caller message is incomplete or only a fragment.
 
-FAQ is only for short factual questions.
+FAQ is only for short factual company questions.
 
 Return only the label.
 `,
