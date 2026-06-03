@@ -340,4 +340,283 @@ export function handleMediaStream(ws) {
     }
 
     const companyMatch = text.match(
-      /\b(?:my company is|company is|we are)\s
+      /\b(?:my company is|company is|we are)\s+([^.!?]{2,80})/i
+    );
+
+    if (companyMatch?.[1]) {
+      callerMemory.company = companyMatch[1].trim();
+      console.log(`[Memory] Caller company remembered: ${callerMemory.company}`);
+    }
+
+    const positionMatch = text.match(
+      /\b(?:i work as|my position is|my role is)\s+(?:an?\s+)?([a-zA-Z][a-zA-Z' -]{2,50})\b/i
+    );
+
+    if (positionMatch?.[1]) {
+      const rawPosition = positionMatch[1]
+        .replace(/[.?!,].*$/, '')
+        .replace(/\b(?:and|at|for|with|from|looking|need|want)\b.*$/i, '')
+        .trim();
+
+      if (rawPosition) {
+        callerMemory.position = rawPosition.toLowerCase();
+        console.log(`[Memory] Caller position remembered: ${callerMemory.position}`);
+      }
+    }
+
+    const needKeywords =
+      /\b(?:need|want|looking for|interested in|connect|setup|install|service|hardware|software|network|internet|server|firewall|security|cybersecurity|cloud|database|migration|data recovery|backup)\b/i;
+
+    if (needKeywords.test(text)) {
+      callerMemory.needs.push(text);
+      callerMemory.needs = callerMemory.needs.slice(-5);
+    }
+  }
+
+  function getDirectResponse(transcript) {
+    const text = transcript.trim();
+
+    const normalized = text
+      .toLowerCase()
+      .trim()
+      .replace(/[^\p{L}\p{N}\s]/gu, '')
+      .replace(/\s+/g, ' ');
+
+    const nameIntro = text.match(
+      /\b(?:my name is|this is|call me)\s+([a-zA-Z][a-zA-Z' -]{1,40})\b/i
+    );
+
+    if (nameIntro) {
+      const name = callerMemory.name || cleanName(nameIntro[1]);
+
+      if (isValidName(name)) {
+        return `Nice to meet you, ${name}. How can I help you today?`;
+      }
+    }
+
+    const simpleIAmIntro = text.match(
+      /^(?:hello|hi|hey)?\.?\s*(?:i am|i'm)\s+([a-zA-Z][a-zA-Z' -]{1,40})[.!?]?$/i
+    );
+
+    if (simpleIAmIntro) {
+      const name = callerMemory.name || cleanName(simpleIAmIntro[1]);
+
+      if (isValidName(name)) {
+        return `Nice to meet you, ${name}. How can I help you today?`;
+      }
+    }
+
+    if (
+      /\b(?:what(?:'s| is) the company name|company name|what is axion|who are you)\b/i.test(
+        text
+      )
+    ) {
+      return 'The company name is Axion.';
+    }
+
+    const greetingPhrases = [
+      'hi',
+      'hello',
+      'hey',
+      'good morning',
+      'morning',
+      'good afternoon',
+      'afternoon',
+      'good evening',
+      'evening',
+      'bonjour',
+      'salut',
+      'salam',
+      'marhaba',
+      'مرحبا',
+      'اهلا',
+      'أهلا',
+      'السلام عليكم',
+    ];
+
+    if (greetingPhrases.includes(normalized)) {
+      return `Hello${callerMemory.name ? ` ${callerMemory.name}` : ''}. How can I help?`;
+    }
+
+    if (
+      /\b(?:what(?:'s| is) my name|do you remember my name|who am i)\b/i.test(
+        text
+      )
+    ) {
+      return callerMemory.name
+        ? `Your name is ${callerMemory.name}.`
+        : "I don't think you told me your name yet.";
+    }
+
+    if (
+      /\b(?:what(?:'s| is) my (?:position|role|job)|what do i work as|where do i work)\b/i.test(
+        text
+      )
+    ) {
+      return callerMemory.position
+        ? `You mentioned that you work as ${callerMemory.position}.`
+        : "I don't think you told me your position yet.";
+    }
+
+    if (/^(?:yes|yes please|sure|okay|ok)$/i.test(normalized)) {
+      return 'Sure. How can I help?';
+    }
+
+    if (/\b(?:thank you|thanks|appreciate it)\b/i.test(text)) {
+      return "You're welcome.";
+    }
+
+    if (/\b(?:bye|goodbye|see you)\b/i.test(text)) {
+      return `Goodbye${callerMemory.name ? `, ${callerMemory.name}` : ''}. Have a great day.`;
+    }
+
+    return null;
+  }
+
+  function isTranscriptFragment(transcript) {
+    const text = transcript.trim().toLowerCase();
+    const wordCount = text.split(/\s+/).filter(Boolean).length;
+
+    if (!text) return true;
+
+    if (
+      wordCount <= 2 &&
+      /^(and|or|but|also|then|with|between|for|to|from|about)$/i.test(text)
+    ) {
+      return true;
+    }
+
+    if (
+      wordCount <= 3 &&
+      /^(and|or|but|also|then|with|between|for|to|from|about)\b/i.test(text)
+    ) {
+      return true;
+    }
+
+    if (/\b(?:and|or|with|between|for|to|from|about)\s*$/i.test(text)) {
+      return true;
+    }
+
+    const nounListOnly =
+      wordCount <= 8 &&
+      /(?:screen|screens|mouse|keyboard|router|routers|switch|switches|cable|cables|fiber|monitor|laptop|pc|computer)/i.test(
+        text
+      ) &&
+      !/\b(?:do you|what|how|where|need|provide|have|sell|cost|price|connect|setup)\b/i.test(
+        text
+      );
+
+    if (nounListOnly) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function cleanName(value) {
+    const cleaned = value
+      .replace(/[.?!,].*$/, '')
+      .replace(/\b(?:and|from|with|calling|looking|need|want|have|worried|interested|working|work|looking)\b.*$/i, '')
+      .trim();
+
+    return cleaned
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((part) =>
+        part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()
+      )
+      .join(' ');
+  }
+
+  function isValidName(value) {
+    if (!value) return false;
+
+    const words = value.split(/\s+/).filter(Boolean);
+
+    if (words.length > 3) return false;
+
+    const invalidWords = [
+      'worried',
+      'interested',
+      'looking',
+      'working',
+      'calling',
+      'engineer',
+      'manager',
+      'developer',
+      'support',
+      'sales',
+      'from',
+      'home',
+    ];
+
+    return !words.some((word) => invalidWords.includes(word.toLowerCase()));
+  }
+
+  async function sendOpeningGreeting() {
+    const greeting = `Hello, ${config.companyName}. How can I help?`;
+
+    isOpeningGreetingActive = true;
+    hasSentOpeningGreeting = false;
+
+    await ttsStream.waitUntilReady();
+
+    console.log(`[Session] Sending opening greeting: "${greeting}"`);
+
+    callTranscript.push({
+      role: 'assistant',
+      text: greeting,
+      timestamp: Date.now(),
+    });
+
+    ttsStream.sendText(greeting);
+    await ttsStream.finish();
+
+    clearTimeout(openingGreetingFallbackTimer);
+
+    openingGreetingFallbackTimer = setTimeout(() => {
+      if (isOpeningGreetingActive) {
+        isOpeningGreetingActive = false;
+        hasSentOpeningGreeting = true;
+        console.log('[Session] Opening greeting released by fallback timer');
+      }
+    }, 1200);
+  }
+
+  function cleanup() {
+    if (sttStream) {
+      sttStream.close();
+      sttStream = null;
+    }
+
+    clearTimeout(openingGreetingFallbackTimer);
+
+    if (ttsStream) {
+      ttsStream.close();
+      ttsStream = null;
+    }
+  }
+
+  async function logCall() {
+    try {
+      const { createClient } = await import('@supabase/supabase-js');
+      const supabase = createClient(
+        config.supabase.url,
+        config.supabase.serviceKey
+      );
+
+      await supabase.from('call_logs').insert({
+        call_sid: callSid,
+        transcript: callTranscript,
+        duration_ms:
+          callTranscript.length > 0
+            ? Date.now() - callTranscript[0].timestamp
+            : 0,
+      });
+
+      console.log('[Session] Call logged');
+    } catch (err) {
+      console.error('[Session] Log error:', err.message);
+    }
+  }
+}
