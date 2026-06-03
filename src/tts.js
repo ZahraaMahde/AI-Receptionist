@@ -27,16 +27,22 @@ export function createTTSStream() {
   let ws = null;
   let isReady = false;
   let isClosedByUser = false;
+
   let audioHandler = null;
   let finalHandler = null;
 
   let readyResolvers = [];
   let finalResolvers = [];
+
   let keepAliveTimer = null;
   let reconnecting = false;
 
   function connect() {
-    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    if (
+      ws &&
+      (ws.readyState === WebSocket.OPEN ||
+        ws.readyState === WebSocket.CONNECTING)
+    ) {
       return;
     }
 
@@ -89,8 +95,7 @@ export function createTTSStream() {
         if (message.isFinal || message.is_final) {
           console.log('[TTS] Stream complete');
 
-          finalResolvers.forEach((resolve) => resolve());
-          finalResolvers = [];
+          resolveFinals();
 
           if (finalHandler) {
             finalHandler();
@@ -249,14 +254,13 @@ export function createTTSStream() {
         const timeout = setTimeout(() => {
           resolveFinals();
           resolve();
-        }, 2500);
+        }, 700);
 
         finalResolvers.push(() => {
           clearTimeout(timeout);
           resolve();
         });
 
-        // Important:
         // flush:true asks ElevenLabs to generate buffered text.
         // Do NOT send { text: "" } here, because that closes the stream.
         sendRaw({
@@ -271,7 +275,10 @@ export function createTTSStream() {
 
       resolveFinals();
 
-      if (ws?.readyState === WebSocket.OPEN || ws?.readyState === WebSocket.CONNECTING) {
+      if (
+        ws?.readyState === WebSocket.OPEN ||
+        ws?.readyState === WebSocket.CONNECTING
+      ) {
         try {
           ws.close(1000, 'barge-in');
         } catch {
@@ -289,12 +296,12 @@ export function createTTSStream() {
 
     close() {
       isClosedByUser = true;
+
       stopKeepAlive();
       resolveFinals();
 
       if (ws) {
         try {
-          // Only close the socket when the call ends.
           sendRaw({ text: '' });
           ws.close(1000, 'call-ended');
         } catch {
