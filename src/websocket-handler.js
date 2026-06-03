@@ -2,7 +2,8 @@ import { createSTTStream } from './stt.js';
 import { createTTSStream } from './tts.js';
 import { streamLLMResponse } from './llm.js';
 import { retrieveContext, cacheAnswer, warmUp } from './rag.js';
-import { getFAQResponse } from './faq-router.js';
+import { classifyFAQIntent, INTENTS } from './intent-router.js';
+import { getFAQAnswer } from './faq-answers.js';
 import { config } from './config.js';
 
 /**
@@ -101,6 +102,7 @@ export function handleMediaStream(ws) {
       !hasInterruptedCurrentSpeech
     ) {
       console.log('[Session] Barge-in detected — interrupting TTS');
+
       hasInterruptedCurrentSpeech = true;
 
       if (isAssistantSpeaking) {
@@ -206,17 +208,27 @@ export function handleMediaStream(ws) {
       if (directResponse) {
         fullResponse = directResponse;
 
-        console.log('[FastIntent] Direct response — skipping RAG and LLM');
+        console.log('[FastIntent] Direct response — skipping FAQ, RAG and LLM');
         ttsStream.sendText(fullResponse);
       } else {
-        const faqResponse = getFAQResponse(transcript);
+        const faqIntent = await classifyFAQIntent(transcript);
 
-        if (faqResponse) {
-          fullResponse = faqResponse;
+        if (hasInterruptedCurrentSpeech) {
+          return;
+        }
 
-          console.log('[FAQ] Matched FAQ — skipping RAG and LLM');
-          ttsStream.sendText(fullResponse);
-        } else {
+        if (faqIntent !== INTENTS.UNKNOWN) {
+          const faqAnswer = getFAQAnswer(faqIntent);
+
+          if (faqAnswer) {
+            fullResponse = faqAnswer;
+
+            console.log(`[FAQ] Matched intent ${faqIntent} — skipping RAG and LLM`);
+            ttsStream.sendText(fullResponse);
+          }
+        }
+
+        if (!fullResponse) {
           const { context, cached, cachedAnswer, embedding } =
             await retrieveContext(transcript);
 
@@ -330,7 +342,7 @@ export function handleMediaStream(ws) {
     }
 
     const companyMatch = text.match(
-      /\b(?:my company is|company is|i have a company(?: called| named)?|we are)\s+([^.!?]{2,80})/i
+      /\b(?:my company is|company is|we are)\s+([^.!?]{2,80})/i
     );
 
     if (companyMatch?.[1]) {
