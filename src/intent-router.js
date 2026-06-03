@@ -28,7 +28,13 @@ export { INTENTS };
 export async function classifyFAQIntent(transcript) {
   const text = normalize(transcript);
 
+  if (shouldForceRAG(text)) {
+    console.log('[FAQ] Complex question detected — using RAG');
+    return INTENTS.UNKNOWN;
+  }
+
   const ruleIntent = classifyWithRules(text);
+
   if (ruleIntent !== INTENTS.UNKNOWN) {
     return ruleIntent;
   }
@@ -36,15 +42,56 @@ export async function classifyFAQIntent(transcript) {
   return classifyWithLLM(transcript);
 }
 
+function shouldForceRAG(text) {
+  return (
+    /\b(?:explain|describe|compare|comparison|difference|different|details|detail|in detail|how does|how do you|which is better|recommend|recommendation|suggest|suggestion|best|choose|help me choose|advise|advice)\b/i.test(text) ||
+    /\b(?:difference between|compare between|what is better|what's better)\b/i.test(text)
+  );
+}
+
 function classifyWithRules(text) {
+  // Network design / equipment requirement rules should come before location.
+  // Otherwise phrases like "office has 3 floors" may be wrongly treated as location.
+  if (
+    hasAny(text, [
+      'what products do i need',
+      'what product do i need',
+      'what things do i need',
+      'what equipment do i need',
+      'equipment needed',
+      'products needed',
+      'connect one internet line',
+      'one internet line',
+      'internet line',
+      'what i need for network',
+      'what do i need for network',
+      'internet everywhere',
+      'wifi everywhere',
+      'internet on every floor',
+      'wifi on every floor',
+      'three floors',
+      '3 floors',
+      'five floors',
+      '5 floors',
+      'office network',
+      'company building',
+      'building with',
+    ])
+  ) {
+    return INTENTS.NETWORK_EQUIPMENT_REQUIREMENTS;
+  }
+
   if (
     hasAny(text, [
       'where are you',
       'where you are',
+      'where you at',
+      'where are you at',
       'where are u',
+      'where are you based',
       'location',
       'address',
-      'office',
+      'office location',
       'where is your office',
     ])
   ) {
@@ -62,6 +109,8 @@ function classifyWithRules(text) {
       'call you',
       'call the team',
       'sales team',
+      'how can i reach',
+      'how do i reach',
     ])
   ) {
     return INTENTS.CONTACT_SALES;
@@ -87,6 +136,7 @@ function classifyWithRules(text) {
       'your services',
       'what do you do',
       'services do you have',
+      'what can you help with',
     ])
   ) {
     return INTENTS.GENERAL_SERVICES;
@@ -94,30 +144,16 @@ function classifyWithRules(text) {
 
   if (
     hasAny(text, [
-      'what products do i need',
-      'what product do i need',
-      'what things do i need',
-      'what equipment do i need',
-      'equipment needed',
-      'products needed',
-      'connect one internet line',
-      'one internet line',
-      'internet line',
-      'what i need for network',
-      'what do i need for network',
-    ])
-  ) {
-    return INTENTS.NETWORK_EQUIPMENT_REQUIREMENTS;
-  }
-
-  if (
-    hasAny(text, [
       'firewall',
       'cybersecurity',
       'cyber security',
-      'security',
-      'secure',
+      'security service',
+      'secure network',
       'utm',
+      'hacker',
+      'hackers',
+      'attack',
+      'threat',
     ])
   ) {
     return INTENTS.CYBERSECURITY;
@@ -132,6 +168,10 @@ function classifyWithRules(text) {
       'disaster recovery',
       'data recovery',
       'backup',
+      'move data',
+      'move my data',
+      'server failure',
+      'lost files',
     ])
   ) {
     return INTENTS.DATA_MIGRATION_RECOVERY;
@@ -144,10 +184,13 @@ function classifyWithRules(text) {
       'internet',
       'wifi',
       'wi fi',
+      'wi-fi',
       'router',
       'switch',
       'fiber',
       'cabling',
+      'vlan',
+      'qos',
     ])
   ) {
     return INTENTS.NETWORKING_SERVICES;
@@ -159,12 +202,8 @@ function classifyWithRules(text) {
       'servers',
       'storage',
       'hardware',
-      'router',
-      'switch',
-      'firewall',
-      'wifi',
-      'wi fi',
       'ip telephony',
+      'call management',
     ])
   ) {
     return INTENTS.HARDWARE_SUPPLY;
@@ -177,6 +216,8 @@ function classifyWithRules(text) {
       'data center',
       'virtualization',
       'server setup',
+      'high availability',
+      'deployment',
     ])
   ) {
     return INTENTS.SYSTEM_INTEGRATION;
@@ -187,8 +228,12 @@ function classifyWithRules(text) {
       'access control',
       'surveillance',
       'camera',
+      'cameras',
       'video surveillance',
       'entry management',
+      'employee cards',
+      'cards to enter',
+      'building entry',
     ])
   ) {
     return INTENTS.ACCESS_CONTROL;
@@ -201,6 +246,8 @@ function classifyWithRules(text) {
       'managed it',
       'technical support',
       'sla',
+      'remote support',
+      'preventive maintenance',
     ])
   ) {
     return INTENTS.SUPPORT_MAINTENANCE;
@@ -242,6 +289,21 @@ LOCATION
 CONTACT_SALES
 PRICING
 UNKNOWN
+
+Important:
+Return UNKNOWN if the caller asks for:
+- explanation
+- comparison
+- recommendation
+- detailed answer
+- advice
+- "what is the difference"
+- "explain in detail"
+- "suggest for me"
+- "what is best"
+- "help me choose"
+
+FAQ is only for short factual questions.
 
 Return only the label.
 `,
