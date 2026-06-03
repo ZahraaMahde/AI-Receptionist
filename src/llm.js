@@ -19,6 +19,9 @@ export async function* streamLLMResponse(
   const start = Date.now();
   let firstToken = true;
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 7000);
+
   const systemMessage = buildSystemMessage(ragContext, callerMemory);
 
   const messages = [
@@ -27,52 +30,61 @@ export async function* streamLLMResponse(
     { role: 'user', content: userMessage },
   ];
 
-  const stream = await openai.chat.completions.create({
-    model: config.openai?.chatModel || 'gpt-4o-mini',
-    messages,
-    stream: true,
-    temperature: 0.25,
-    max_tokens: 60,
-    presence_penalty: 0.1,
-  });
+  try {
+    const stream = await openai.chat.completions.create(
+      {
+        model: config.openai?.chatModel || 'gpt-4o-mini',
+        messages,
+        stream: true,
+        temperature: 0.25,
+        max_tokens: 60,
+        presence_penalty: 0.1,
+      },
+      {
+        signal: controller.signal,
+      }
+    );
 
-  let fullResponse = '';
-  let buffer = '';
+    let fullResponse = '';
+    let buffer = '';
 
-  for await (const chunk of stream) {
-    const content = chunk.choices[0]?.delta?.content;
-    if (!content) continue;
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content;
+      if (!content) continue;
 
-    if (firstToken) {
-      console.log(`[LLM] First token in ${Date.now() - start}ms`);
-      firstToken = false;
-    }
-
-    fullResponse += content;
-    buffer += content;
-
-    const shouldFlush =
-      buffer.length >= 70 ||
-      /[.!?]\s*$/.test(buffer);
-
-    if (shouldFlush) {
-      const output = buffer.trim();
-
-      if (output) {
-        yield `${output} `;
+      if (firstToken) {
+        console.log(`[LLM] First token in ${Date.now() - start}ms`);
+        firstToken = false;
       }
 
-      buffer = '';
+      fullResponse += content;
+      buffer += content;
+
+      const shouldFlush =
+        buffer.length >= 70 ||
+        /[.!?]\s*$/.test(buffer);
+
+      if (shouldFlush) {
+        const output = buffer.trim();
+
+        if (output) {
+          yield `${output} `;
+        }
+
+        buffer = '';
+      }
     }
-  }
 
-  if (buffer.trim()) {
-    yield `${buffer.trim()} `;
-  }
+    if (buffer.trim()) {
+      yield `${buffer.trim()} `;
+    }
 
-  console.log(
-    `[LLM] Complete in ${Date.now() - start}ms (${fullResponse.length} chars)`
-  );
+    console.log(
+      `[LLM] Complete in ${Date.now() - start}ms (${fullResponse.length} chars)`
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 /**
