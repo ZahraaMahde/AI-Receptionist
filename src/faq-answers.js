@@ -6,7 +6,7 @@ export function getFAQAnswer(intent) {
       return 'Axion provides IT consulting, networking, hardware supply, cybersecurity, data services, system integration, and managed IT support.';
 
     case INTENTS.NETWORK_EQUIPMENT_REQUIREMENTS:
-      return 'You would typically need a router or firewall, network switches, Wi-Fi access points, cabling or fiber, and proper VLAN and security configuration.';
+      return 'You would typically need a router or firewall, switches, Wi-Fi access points, cabling or fiber, and proper VLAN and security configuration.';
 
     case INTENTS.NETWORKING_SERVICES:
       return 'Yes. Axion provides enterprise networking, Wi-Fi, switching, routing, VLANs, fiber infrastructure, and structured cabling.';
@@ -33,7 +33,7 @@ export function getFAQAnswer(intent) {
       return 'Axion is located at G20 Tower, Ashrafieh, Lebanon.';
 
     case INTENTS.CONTACT_SALES:
-      return 'You can reach Axion at +961 4 535 556 or +961 81 554 003, or email sales@techrise.com.lb.';
+      return 'You can reach Axion at +961 4 535 556 or +961 81 554 003, or by email at sales@techrise.com.lb.';
 
     case INTENTS.PRICING:
       return 'Pricing depends on the solution. I can connect you with the team for a detailed quote.';
