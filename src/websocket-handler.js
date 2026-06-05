@@ -17,6 +17,7 @@ export function handleMediaStream(ws) {
   let sttStream = null;
   let ttsStream = null;
 
+  let isCallActive = true;
   let isProcessing = false;
   let pendingTranscript = null;
   let conversationHistory = [];
@@ -40,7 +41,7 @@ export function handleMediaStream(ws) {
   ttsStream = createTTSStream();
 
   ttsStream.onAudio((audioBuffer) => {
-    if (!streamSid || !ws) return;
+    if (!isCallActive || !streamSid || !ws) return;
 
     if (isOpeningGreetingActive) {
       hasSentOpeningGreeting = true;
@@ -74,7 +75,7 @@ export function handleMediaStream(ws) {
   });
 
   sttStream.onUtteranceEnd(async (transcript) => {
-    if (!transcript) return;
+    if (!transcript || !isCallActive) return;
 
     if (isProcessing) {
       pendingTranscript = transcript;
@@ -86,6 +87,8 @@ export function handleMediaStream(ws) {
   });
 
   sttStream.onTranscript(({ text, fullText, isFinal }) => {
+    if (!isCallActive) return;
+
     const heardText = (text || fullText || '').trim();
     const wordCount = heardText.split(/\s+/).filter(Boolean).length;
 
@@ -107,9 +110,12 @@ export function handleMediaStream(ws) {
 
       if (isAssistantSpeaking) {
         isAssistantSpeaking = false;
-        ttsStream.interrupt();
 
-        if (streamSid) {
+        if (ttsStream) {
+          ttsStream.interrupt();
+        }
+
+        if (streamSid && isCallActive) {
           ws.send(JSON.stringify({
             event: 'clear',
             streamSid,
@@ -120,6 +126,8 @@ export function handleMediaStream(ws) {
   });
 
   ws.on('message', (data) => {
+    if (!isCallActive) return;
+
     try {
       const message = JSON.parse(data.toString());
 
@@ -160,6 +168,7 @@ export function handleMediaStream(ws) {
 
         case 'stop':
           console.log('[Twilio] Stream stopped');
+          isCallActive = false;
           cleanup();
           break;
 
@@ -173,17 +182,19 @@ export function handleMediaStream(ws) {
 
   ws.on('close', () => {
     console.log('[Session] WebSocket closed');
+    isCallActive = false;
     cleanup();
     logCall();
   });
 
   ws.on('error', (err) => {
     console.error('[Session] WebSocket error:', err);
+    isCallActive = false;
     cleanup();
   });
 
   async function processTranscript(transcript) {
-    if (!transcript) return;
+    if (!transcript || !isCallActive || !ttsStream) return;
 
     transcript = transcript.trim();
 
@@ -216,11 +227,13 @@ export function handleMediaStream(ws) {
         fullResponse = directResponse;
 
         console.log('[FastIntent] Direct response — skipping FAQ, RAG and LLM');
+
+        if (!isCallActive || !ttsStream) return;
         ttsStream.sendText(fullResponse);
       } else {
         const faqIntent = await classifyFAQIntent(transcript);
 
-        if (hasInterruptedCurrentSpeech) {
+        if (hasInterruptedCurrentSpeech || !isCallActive || !ttsStream) {
           return;
         }
 
@@ -231,6 +244,8 @@ export function handleMediaStream(ws) {
             fullResponse = faqAnswer;
 
             console.log(`[FAQ] Matched intent ${faqIntent} — skipping RAG and LLM`);
+
+            if (!isCallActive || !ttsStream) return;
             ttsStream.sendText(fullResponse);
           }
         }
@@ -239,7 +254,7 @@ export function handleMediaStream(ws) {
           const { context, cached, cachedAnswer, embedding } =
             await retrieveContext(transcript);
 
-          if (hasInterruptedCurrentSpeech) {
+          if (hasInterruptedCurrentSpeech || !isCallActive || !ttsStream) {
             return;
           }
 
@@ -247,6 +262,8 @@ export function handleMediaStream(ws) {
             console.log('[Session] Cache hit — skipping LLM');
 
             fullResponse = cachedAnswer;
+
+            if (!isCallActive || !ttsStream) return;
             ttsStream.sendText(cachedAnswer);
           } else {
             const llmStream = streamLLMResponse(
@@ -257,20 +274,22 @@ export function handleMediaStream(ws) {
             );
 
             for await (const chunk of llmStream) {
-              if (hasInterruptedCurrentSpeech) break;
+              if (hasInterruptedCurrentSpeech || !isCallActive || !ttsStream) {
+                break;
+              }
 
               fullResponse += chunk;
               ttsStream.sendText(chunk);
             }
 
-            if (embedding && fullResponse && !hasInterruptedCurrentSpeech) {
+            if (embedding && fullResponse && !hasInterruptedCurrentSpeech && isCallActive) {
               cacheAnswer(transcript, fullResponse, embedding).catch(() => {});
             }
           }
         }
       }
 
-      if (!hasInterruptedCurrentSpeech) {
+      if (!hasInterruptedCurrentSpeech && isCallActive && ttsStream) {
         await ttsStream.finish();
       }
 
@@ -295,6 +314,10 @@ export function handleMediaStream(ws) {
     } catch (err) {
       console.error('[Session] Processing error:', err);
 
+      if (!isCallActive || !ttsStream) {
+        return;
+      }
+
       const fallback =
         "I'm sorry, I didn't quite catch that. Could you repeat your question?";
 
@@ -305,7 +328,7 @@ export function handleMediaStream(ws) {
     } finally {
       isProcessing = false;
 
-      if (pendingTranscript) {
+      if (pendingTranscript && isCallActive) {
         const nextTranscript = pendingTranscript;
         pendingTranscript = null;
 
@@ -314,6 +337,8 @@ export function handleMediaStream(ws) {
             console.error('[Session] Pending transcript error:', err);
           });
         });
+      } else {
+        pendingTranscript = null;
       }
     }
   }
@@ -439,7 +464,7 @@ export function handleMediaStream(ws) {
     }
 
     if (
-      /\b(?:what(?:'s| is) my name|do you remember my name|who am i)\b/i.test(
+      /\b(?:what(?:'s| is) my name|do you remember my name|who am i|remember me.*name)\b/i.test(
         text
       )
     ) {
@@ -458,8 +483,12 @@ export function handleMediaStream(ws) {
         : "I don't think you told me your position yet.";
     }
 
-    if (/^(?:yes|yes please|sure|okay|ok)$/i.test(normalized)) {
+    if (/^(?:yes|yes please|sure|okay|ok|okay okay|ok ok)$/i.test(normalized)) {
       return 'Sure. How can I help?';
+    }
+
+    if (/^(?:no|nope)$/i.test(normalized)) {
+      return 'Alright. How can I help?';
     }
 
     if (/\b(?:thank you|thanks|appreciate it)\b/i.test(text)) {
@@ -554,12 +583,16 @@ export function handleMediaStream(ws) {
   }
 
   async function sendOpeningGreeting() {
+    if (!isCallActive || !ttsStream) return;
+
     const greeting = `Hello, ${config.companyName}. How can I help?`;
 
     isOpeningGreetingActive = true;
     hasSentOpeningGreeting = false;
 
     await ttsStream.waitUntilReady();
+
+    if (!isCallActive || !ttsStream) return;
 
     console.log(`[Session] Sending opening greeting: "${greeting}"`);
 
@@ -570,12 +603,15 @@ export function handleMediaStream(ws) {
     });
 
     ttsStream.sendText(greeting);
-    await ttsStream.finish();
+
+    if (isCallActive && ttsStream) {
+      await ttsStream.finish();
+    }
 
     clearTimeout(openingGreetingFallbackTimer);
 
     openingGreetingFallbackTimer = setTimeout(() => {
-      if (isOpeningGreetingActive) {
+      if (isOpeningGreetingActive && isCallActive) {
         isOpeningGreetingActive = false;
         hasSentOpeningGreeting = true;
         console.log('[Session] Opening greeting released by fallback timer');
@@ -584,12 +620,18 @@ export function handleMediaStream(ws) {
   }
 
   function cleanup() {
+    isCallActive = false;
+    pendingTranscript = null;
+    isProcessing = false;
+    hasInterruptedCurrentSpeech = true;
+
     if (sttStream) {
       sttStream.close();
       sttStream = null;
     }
 
     clearTimeout(openingGreetingFallbackTimer);
+    openingGreetingFallbackTimer = null;
 
     if (ttsStream) {
       ttsStream.close();
